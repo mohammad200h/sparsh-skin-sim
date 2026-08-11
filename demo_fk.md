@@ -64,7 +64,7 @@ The `flex_` prefix is optional: `mf_tip` and `flex_mf_tip` are equivalent.
 ## Grid coordinates
 
 `--taxel-row` and `--taxel-col` use the **FK / Open3D panel layout** — the same
-labelling as `leap_sensor_taxel_map.json` after FK reordering (`fk_taxel_util.py`).
+labelling as `leap_sensor_taxel_map.json` after FK reordering (`util/fk_taxel_util.py`).
 
 Indices are **zero-based**. Row increases downward on the panel; column increases
 to the right (matching the blue fingertip / red palm grids in Open3D).
@@ -98,7 +98,7 @@ lights the left corner in Open3D).
 
 **Note on `uspa46_2`:** This palm sensor is mounted **180° in-plane** relative to
 the other palm pads. FK positions for this patch are mirrored in
-`fk_taxel_util.get_fk_taxel_frames` so the Open3D layout matches the MuJoCo flex
+`util.fk_taxel_util.get_fk_taxel_frames` so the Open3D layout matches the MuJoCo flex
 mesh. Grid `(row, col)` still follows the FK panel — no extra flags needed.
 
 ### Middle finger (MF), palm → tip
@@ -188,8 +188,8 @@ Use `--vmax` to fix the colour scale when comparing runs.
 
 ## How taxel spawn works (implementation)
 
-1. `add_cube_on_taxel` in `objects.py` compiles the scene spec temporarily
-2. `flex_vertex_for_fk_grid` in `fk_taxel_util.py` maps `(flex, row, col)` →
+1. `add_cube_on_taxel` in `util/objects_util.py` compiles the scene spec temporarily
+2. `flex_vertex_for_fk_grid` in `util/fk_taxel_util.py` maps `(flex, row, col)` →
    hardware taxel id → MuJoCo flex vertex index
 3. Cube centre is placed above that vertex along the taxel outward normal
    (+ clearance, + optional `--offset`)
@@ -200,7 +200,7 @@ Programmatic use:
 
 ```python
 import mujoco as mj
-from objects import add_cube_on_taxel
+from util.objects_util import add_cube_on_taxel
 
 spec = mj.MjSpec.from_file("leapXELA_model/scene_mjx_cube_CoACD_mjx_flex_sensor.xml")
 add_cube_on_taxel(spec, flex_name="mf_px_uspa44", grid_row=1, grid_col=1)
@@ -215,11 +215,11 @@ model = spec.compile()
 |------|------|
 | `demo_fk.py` | This demo (MuJoCo + FK Open3D) |
 | `demo.py` | Same spawn options, no FK visualizer |
-| `objects.py` | `add_cube_on_taxel`, `spawn_pose_above_taxel`, tetris helpers |
-| `fk_taxel_util.py` | FK taxel frames, grid→vertex mapping, Open3D visualizer |
-| `flex_util.py` | Kelvin–Voigt force estimation |
-| `flex_visualizer.py` | Live MuJoCo flex heatmaps |
-| `demo_implementation.md` | Deeper API notes for flex_util / objects / demo.py |
+| `util/objects_util.py` | `add_cube_on_taxel`, `spawn_pose_above_taxel`, tetris helpers |
+| `util/fk_taxel_util.py` | FK taxel frames, grid→vertex mapping, Open3D visualizer |
+| `util/flex_util.py` | Kelvin–Voigt force estimation |
+| `util/flex_visualizer.py` | Live MuJoCo flex heatmaps |
+| `demo_implementation.md` | Deeper API notes for util.flex_util / util.objects_util / demo.py |
 
 Scene XML:
 

@@ -7,9 +7,8 @@ from typing import Callable, Sequence
 import mujoco as mj
 import numpy as np
 
-from flex_util import flex_id, flex_vertex_body_ids
-
-from fk_taxel_util import flex_vertex_for_fk_grid
+from .flex_util import flex_id, flex_vertex_body_ids
+from .fk_taxel_util import flex_vertex_for_fk_grid
 
 # Match the former reorientation-cube defaults.
 DEFAULT_CUBE_NAME = "cube"

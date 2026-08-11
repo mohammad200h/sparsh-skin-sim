@@ -10,21 +10,21 @@ import mujoco as mj
 import mujoco.viewer
 import numpy as np
 
-from flex_util import AllFlexForceEstimator, list_flex_names
-from flex_visualizer import visualize_all_flexes_live
-from fk_taxel_util import (
+from util.flex_visualizer import visualize_all_flexes_live
+from util.flex_util import AllFlexForceEstimator, list_flex_names
+from util.fk_taxel_util import (
     compute_fk_taxels,
     create_fk_taxel_visualizer,
     flex_forces_to_taxel_forces,
+    flex_vertex_for_fk_grid,
     read_leap_joint_angles,
 )
-from objects import (
+from util.objects_util import (
     add_cube_on_taxel,
     add_sticky_cube_on_taxel,
     add_tetris_part,
     infer_flex_grid_size,
 )
-from fk_taxel_util import flex_vertex_for_fk_grid
 
 
 SCENE_XML = (

@@ -10,9 +10,9 @@ import mujoco as mj
 import mujoco.viewer
 import numpy as np
 
-from flex_util import AllFlexForceEstimator, list_flex_names
-from flex_visualizer import visualize_all_flexes_live
-from objects import add_tetris_part
+from util.flex_visualizer import visualize_all_flexes_live
+from util.flex_util import AllFlexForceEstimator, list_flex_names
+from util.objects_util import add_tetris_part
 
 
 SCENE_XML = (

@@ -17,7 +17,7 @@ import numpy as np
 import pytorch_kinematics as pk
 import torch
 
-from flex_util import flex_vertex_body_ids, list_flex_names
+from .flex_util import flex_vertex_body_ids, list_flex_names
 
 N_TAXELS = 368
 
@@ -127,11 +127,10 @@ _MUJOCO_PALM_R = np.array(
 )
 _MUJOCO_PALM_T = np.array([0.0, 0.0, 0.1], dtype=np.float64)
 
-_DEFAULT_URDF_PATH = (
-    Path(__file__).resolve().parent / "leapXELA_urdf" / "hand_ss.urdf"
-)
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_DEFAULT_URDF_PATH = _REPO_ROOT / "leapXELA_urdf" / "hand_ss.urdf"
 _DEFAULT_TAXEL_MAP_PATH = (
-    Path(__file__).resolve().parent
+    _REPO_ROOT
     / "leapXELA_model"
     / "leapxela"
     / "leap_sensor_taxel_map.json"
@@ -304,7 +303,12 @@ def fk_finger_taxel_id(
     grid_col: int,
     map_path: Path | None = None,
 ) -> int:
-    """Hardware taxel id for a 4×4 finger-segment FK grid cell."""
+    """Hardware taxel id for a 4×4 finger-segment FK grid cell.
+
+    CLI ``(row, col)`` matches the MuJoCo flex vertex grid (vertex 0 at
+    ``(0, 0)``). The raw JSON map is stored 180° from that mesh order, so
+    indices are rotated here.
+    """
     map_path = map_path or _default_taxel_map_path()
     with map_path.open(encoding="utf-8") as f:
         map_dict = json.load(f)
@@ -314,7 +318,9 @@ def fk_finger_taxel_id(
         raise ValueError(
             f"Finger grid cell ({grid_row}, {grid_col}) out of range for 4×4 patch"
         )
-    return int(grid[grid_row, grid_col])
+    # JSON row-major (0,0) is MuJoCo vertex 15; rotate 180° so CLI (0,0) is
+    # the same corner as flex vertex 0 / the on-pad heatmap panel.
+    return int(grid[3 - grid_row, 3 - grid_col])
 
 
 def flex_vertex_for_fk_grid(

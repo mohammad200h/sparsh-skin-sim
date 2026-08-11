@@ -10,9 +10,16 @@ import mujoco as mj
 import mujoco.viewer
 import numpy as np
 
-from flex_util import AllFlexForceEstimator, list_flex_names
-from flex_visualizer import visualize_all_flexes_live
-from objects import add_tetris_part
+from util.flex_visualizer import visualize_all_flexes_live
+from util.flex_util import AllFlexForceEstimator, list_flex_names
+from util.fk_taxel_util import (
+    compute_fk_taxels,
+    create_fk_taxel_visualizer,
+    flex_forces_to_taxel_forces,
+    read_leap_joint_angles,
+)
+from util.motion_util import finger_close_generator
+from util.objects_util import TETRIS_SHAPE_NAMES, add_tetris_part
 
 
 SCENE_XML = (
@@ -54,6 +61,13 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--shape",
+        type=str,
+        default="T",
+        choices=TETRIS_SHAPE_NAMES,
+        help=f"Tetromino shape letter (default: T). One of {', '.join(TETRIS_SHAPE_NAMES)}",
+    )
+    parser.add_argument(
         "--scale",
         type=float,
         default=1.5,
@@ -66,6 +80,35 @@ def parse_args() -> argparse.Namespace:
         metavar=("DX", "DY", "DZ"),
         default=(0.0, 0.0, 0.0),
         help="XYZ offset added to the flex/palm spawn centre (metres)",
+    )
+    parser.add_argument(
+        "--close-duration",
+        type=float,
+        default=1.0,
+        help="Seconds to smoothstep-close IF/MF/RF MCP+PIP+DIP (default: 1.0)",
+    )
+    parser.add_argument(
+        "--mcp-target",
+        type=float,
+        default=1.6,
+        help="Closed MCP joint target [rad] (default: 1.6)",
+    )
+    parser.add_argument(
+        "--pip-target",
+        type=float,
+        default=1.5,
+        help="Closed PIP joint target [rad] (default: 1.5)",
+    )
+    parser.add_argument(
+        "--dip-target",
+        type=float,
+        default=0.9,
+        help="Closed DIP joint target [rad] (default: 0.9)",
+    )
+    parser.add_argument(
+        "--no-fk-viz",
+        action="store_true",
+        help="Disable the Open3D taxel FK visualizer",
     )
     return parser.parse_args()
 
@@ -81,7 +124,7 @@ def main() -> None:
     spec = mj.MjSpec.from_file(SCENE_XML.as_posix())
     piece = add_tetris_part(
         spec,
-        shape="T",
+        shape=args.shape,
         above_palm=args.flex is None,
         flex_name=args.flex,
         scale=args.scale,
@@ -91,8 +134,8 @@ def main() -> None:
     spawn_target = args.flex if args.flex is not None else "palm"
     print(
         f"  tetris spawn pos={tuple(np.round(piece.pos, 4))} "
-        f"name={piece.name} scale={args.scale} yaw=45deg on={spawn_target} "
-        f"offset={tuple(args.offset)}"
+        f"name={piece.name} shape={args.shape} scale={args.scale} "
+        f"yaw=45deg on={spawn_target} offset={tuple(args.offset)}"
     )
     model = spec.compile()
     model.opt.iterations = SOLVER_ITERATIONS
@@ -115,14 +158,40 @@ def main() -> None:
         visualize_force=visualize_force,
     )
     force_est = AllFlexForceEstimator(model, window=5, use_qvel=True)
+    motion = finger_close_generator(
+        model,
+        data,
+        duration=args.close_duration,
+        mcp_target=args.mcp_target,
+        pip_target=args.pip_target,
+        dip_target=args.dip_target,
+    )
+    print(
+        f"  finger close: MCP/PIP/DIP (no thumb), "
+        f"duration={args.close_duration}s "
+        f"mcp={args.mcp_target} pip={args.pip_target} dip={args.dip_target}"
+    )
+
+    fk_viz = None
+    if not args.no_fk_viz:
+        fk_viz = create_fk_taxel_visualizer()
+        print("  FK visualizer: Open3D window (F deform, V vectors, Q quit)")
 
     try:
         with mujoco.viewer.launch_passive(model, data) as viewer:
             while viewer.is_running():
+                if fk_viz is not None and not fk_viz.poll():
+                    break
                 step_start = time.time()
+                next(motion)
                 mj.mj_step(model, data)
                 viewer.sync()
                 forces = force_est.update(model, data)
+                if fk_viz is not None:
+                    joint_angles = read_leap_joint_angles(model, data)
+                    taxel_forces = flex_forces_to_taxel_forces(model, forces)
+                    fk_result = compute_fk_taxels(joint_angles, taxel_forces)
+                    fk_viz.update(fk_result)
                 if visualize_force:
                     viz.update(model, data, forces=forces)
                 else:
@@ -132,6 +201,8 @@ def main() -> None:
                     time.sleep(leftover)
     finally:
         viz.close()
+        if fk_viz is not None:
+            fk_viz.close()
 
 
 if __name__ == "__main__":

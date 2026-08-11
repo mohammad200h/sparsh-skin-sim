@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 import mujoco as mj
 import numpy as np
 
-from flex_util import (
+from .flex_util import (
     all_flex_rest_vertex_positions,
     flex_joint_ids,
     flex_rest_vertex_positions,

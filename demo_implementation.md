@@ -1,16 +1,16 @@
 # Demo Implementation Notes
 
 This document explains the flex-sensing demo and documents the public APIs in
-`objects.py`, `flex_util.py`, `flex_visualizer.py`, and `demo.py`.
+`util/objects_util.py`, `util/flex_util.py`, `util/flex_visualizer.py`, and `demo.py`.
 
 ## Files
 
 | File | Role |
 |------|------|
 | `leapXELA_model/scene_mjx_cube_CoACD_mjx_flex_sensor.xml` | Scene: Leap hand with soft flex skins (no free object in XML) |
-| `objects.py` | Add free bodies to the scene via `MjSpec` (cube / tetrominoes) |
-| `flex_util.py` | Flex topology, displacements, Kelvin–Voigt force estimation |
-| `flex_visualizer.py` | Live matplotlib plots for displacement / force |
+| `util/objects_util.py` | Add free bodies to the scene via `MjSpec` (cube / tetrominoes) |
+| `util/flex_util.py` | Flex topology, displacements, Kelvin–Voigt force estimation |
+| `util/flex_visualizer.py` | Live matplotlib plots for displacement / force |
 | `demo.py` | Loads scene, spawns a tetris piece, runs MuJoCo + visualizer |
 
 Run:
@@ -130,7 +130,7 @@ scene XML
 
 ---
 
-## `objects.py` — constants
+## `util/objects_util.py` — constants
 
 | Symbol | Meaning |
 |--------|---------|
@@ -145,7 +145,7 @@ scene XML
 
 ---
 
-## `objects.py` — spawn helpers
+## `util/objects_util.py` — spawn helpers
 
 ### `palm_sensor_center(model, data=None) -> ndarray (3,)`
 
@@ -167,7 +167,7 @@ Internal priority: explicit `pos` → `flex_name` → palm (`above_palm`) → er
 
 ---
 
-## `objects.py` — adding bodies
+## `util/objects_util.py` — adding bodies
 
 ### `add_cube(spec, *, name="cube", pos=None, quat=…, half_size=…, mass=…, rgba=…, contype=…, conaffinity=…, freejoint=True, above_palm=True, flex_name=None, clearance=…) -> MjsBody`
 
@@ -203,7 +203,7 @@ model = spec.compile()
 
 ---
 
-## `flex_util.py` — constants
+## `util/flex_util.py` — constants
 
 ### `DEFAULT_FLEX_STIFFNESS` (`5.0`)
 
@@ -218,7 +218,7 @@ this default on `FlexForceEstimator`, it replaces \(B\) with the mean
 
 ---
 
-## `flex_util.py` — flex identity & topology
+## `util/flex_util.py` — flex identity & topology
 
 ### `flex_id(model, flex_name) -> int`
 
@@ -245,7 +245,7 @@ flex joints are scalar.
 
 ---
 
-## `flex_util.py` — deformation & rest pose
+## `util/flex_util.py` — deformation & rest pose
 
 ### `flex_joint_displacements(model, data, flex_name) -> ndarray (n_vert, 3)`
 
@@ -280,7 +280,7 @@ Joint velocities from `data.qvel` for the flex’s slide DOFs.
 
 ---
 
-## `flex_util.py` — force estimation
+## `util/flex_util.py` — force estimation
 
 ### `_as_coeff(coeff, shape) -> ndarray`
 
@@ -339,7 +339,7 @@ Wraps one `FlexForceEstimator` per flex.
 
 ---
 
-## `flex_visualizer.py` — plotting helpers
+## `util/flex_visualizer.py` — plotting helpers
 
 ### `_CHANNEL_INDEX`
 
@@ -368,7 +368,7 @@ Near-square subplot grid for \(n\) flexes.
 
 ---
 
-## `flex_visualizer.py` — visualizers
+## `util/flex_visualizer.py` — visualizers
 
 ### class `FlexLiveVisualizer`
 
@@ -430,7 +430,7 @@ CLI: `--visualize-force`, `--no-visualize-force`, `--vmax`, `--flex`, `--scale`.
 ## Suggested calibration snippet
 
 ```python
-from flex_util import (
+from util.flex_util import (
     FlexForceEstimator,
     flex_vertex_contact_forces,
 )
