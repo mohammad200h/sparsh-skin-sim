@@ -7,6 +7,10 @@ from typing import Sequence
 import mujoco as mj
 import numpy as np
 
+from flex_util import flex_id, flex_vertex_body_ids
+
+from fk_taxel_util import flex_vertex_for_fk_grid
+
 # Match the former reorientation-cube defaults.
 DEFAULT_CUBE_NAME = "cube"
 DEFAULT_CUBE_QUAT = (1.0, 0.0, 0.0, 0.0)
@@ -14,6 +18,16 @@ DEFAULT_CUBE_HALF_SIZE = 0.0385
 DEFAULT_CUBE_MASS = 0.108
 DEFAULT_CUBE_RGBA = (0.85, 0.45, 0.15, 1.0)
 DEFAULT_CUBE_CLEARANCE = 0.02  # gap above palm sensors when spawning
+# Small cube dropped on a single taxel; mass is high for the volume.
+DEFAULT_TAXEL_CUBE_HALF_SIZE = 0.005  # 2.5 mm cube (was 1 cm / 4)
+DEFAULT_TAXEL_CUBE_MASS = 0.01  # kg (was 0.5 × 4)
+DEFAULT_TAXEL_CUBE_RGBA = (0.95, 0.25, 0.20, 1.0)
+DEFAULT_TAXEL_CUBE_CLEARANCE = 0.03  # gap above taxel surface when spawning
+# Regular pad grids: (n_cols, n_rows), matching SensorDefinition.count[:2].
+FLEX_GRID_SIZES: dict[str, tuple[int, int]] = {
+    "uspa46": (6, 4),
+    "uspa44": (4, 4),
+}
 # Bit 1 for rigid contacts; affinity bit 2 so the cube collides with flex skins
 # (flex contype/conaffinity = 2) and the floor (also bit 2).
 DEFAULT_CUBE_CONTYPE = 1
@@ -168,6 +182,174 @@ def spawn_pose_above_flex(
     centre_xy = np.mean(np.stack(xy, axis=0), axis=0)
     z = max(tops) + float(size[2]) + float(clearance)
     return np.array([centre_xy[0], centre_xy[1], z], dtype=np.float64) + delta
+
+
+def infer_flex_grid_size(flex_name: str) -> tuple[int, int]:
+    """Return ``(n_cols, n_rows)`` for a regular-grid flex pad.
+
+    Examples: ``uspa46`` → ``(6, 4)`` (4 rows × 6 columns), ``uspa44`` →
+    ``(4, 4)``.
+    """
+    normalized = _normalize_flex_name(flex_name)
+    for key, size in FLEX_GRID_SIZES.items():
+        if key in normalized:
+            return size
+    raise ValueError(
+        f"Cannot infer grid size for flex '{flex_name}'. "
+        f"Known patterns: {', '.join(FLEX_GRID_SIZES)}. "
+        "Pass ``grid_size=(n_cols, n_rows)`` explicitly."
+    )
+
+
+def flex_grid_vertex_index(
+    grid_row: int,
+    grid_col: int,
+    *,
+    n_cols: int,
+    n_rows: int,
+) -> int:
+    """Map a taxel grid cell to the flex vertex index (MuJoCo grid order)."""
+    if not (0 <= grid_row < n_rows):
+        raise ValueError(
+            f"grid_row must be in [0, {n_rows}), got {grid_row}"
+        )
+    if not (0 <= grid_col < n_cols):
+        raise ValueError(
+            f"grid_col must be in [0, {n_cols}), got {grid_col}"
+        )
+    return int(grid_col * n_rows + grid_row)
+
+
+def flex_taxel_pose(
+    model: mj.MjModel,
+    data: mj.MjData,
+    flex_name: str,
+    vertex_index: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """World-frame position and outward normal (+z) for one flex vertex."""
+    fid = flex_id(model, flex_name)
+    adr = int(model.flex_vertadr[fid])
+    n = int(model.flex_vertnum[fid])
+    if not (0 <= vertex_index < n):
+        raise ValueError(
+            f"vertex_index must be in [0, {n}), got {vertex_index} "
+            f"for flex '{flex_name}'"
+        )
+
+    position = np.asarray(
+        data.flexvert_xpos[adr + vertex_index], dtype=np.float64
+    )
+    body_ids = flex_vertex_body_ids(model, flex_name)
+    body_id = int(body_ids[vertex_index])
+    rotation = data.xmat[body_id].reshape(3, 3)
+    normal = rotation[:, 2]
+    return position, normal
+
+
+def spawn_pose_above_taxel(
+    spec: mj.MjSpec,
+    *,
+    flex_name: str,
+    grid_row: int,
+    grid_col: int,
+    grid_size: tuple[int, int] | None = None,
+    half_size: float | Sequence[float] = DEFAULT_TAXEL_CUBE_HALF_SIZE,
+    clearance: float = DEFAULT_TAXEL_CUBE_CLEARANCE,
+    offset: Sequence[float] = (0.0, 0.0, 0.0),
+) -> np.ndarray:
+    """Cube centre above one taxel on a regular-grid flex pad."""
+    size = np.asarray(half_size, dtype=np.float64).reshape(-1)
+    if size.size == 1:
+        extent_z = float(size[0])
+    elif size.size == 3:
+        extent_z = float(size[2])
+    else:
+        raise ValueError(f"half_size must be a scalar or length-3, got {half_size!r}")
+
+    delta = np.asarray(offset, dtype=np.float64).reshape(-1)
+    if delta.size != 3:
+        raise ValueError(f"offset must be length-3 (xyz), got {offset!r}")
+
+    normalized = _normalize_flex_name(flex_name)
+    n_cols, n_rows = grid_size or infer_flex_grid_size(normalized)
+
+    model = spec.compile()
+    data = mj.MjData(model)
+    mj.mj_forward(model, data)
+    vertex_index, _taxel_id = flex_vertex_for_fk_grid(
+        model, normalized, grid_row, grid_col
+    )
+
+    position, normal = flex_taxel_pose(model, data, normalized, vertex_index)
+    centre = position + normal * (extent_z + float(clearance)) + delta
+    return np.asarray(centre, dtype=np.float64)
+
+
+def add_cube_on_taxel(
+    spec: mj.MjSpec,
+    *,
+    flex_name: str,
+    grid_row: int,
+    grid_col: int,
+    name: str | None = None,
+    grid_size: tuple[int, int] | None = None,
+    quat: Sequence[float] = DEFAULT_CUBE_QUAT,
+    half_size: float | Sequence[float] = DEFAULT_TAXEL_CUBE_HALF_SIZE,
+    mass: float = DEFAULT_TAXEL_CUBE_MASS,
+    rgba: Sequence[float] = DEFAULT_TAXEL_CUBE_RGBA,
+    contype: int = DEFAULT_CUBE_CONTYPE,
+    conaffinity: int = DEFAULT_CUBE_CONAFFINITY,
+    freejoint: bool = True,
+    joint_name: str | None = None,
+    clearance: float = DEFAULT_TAXEL_CUBE_CLEARANCE,
+    offset: Sequence[float] = (0.0, 0.0, 0.0),
+) -> mj.MjsBody:
+    """Spawn a small, heavy cube above one taxel on a regular-grid flex pad.
+
+    Parameters
+    ----------
+    flex_name:
+        Flex to target, e.g. ``\"uspa46_1\"`` or ``\"flex_uspa46_1\"``.
+    grid_row, grid_col:
+        Taxel coordinates on the pad grid. For ``uspa46`` pads this is a
+        4×6 grid (4 rows, 6 columns), zero-indexed from one corner.
+    grid_size:
+        Optional ``(n_cols, n_rows)`` override when the flex name does not
+        match a known pattern.
+    half_size, mass:
+        Defaults are a 2.5 mm cube with 2.0 kg mass (dense point load).
+    clearance:
+        Gap between the flex surface and the cube bottom along the taxel normal.
+    offset:
+        Extra world-frame XYZ shift applied after placement on the taxel.
+    """
+    normalized = _normalize_flex_name(flex_name)
+    n_cols, n_rows = grid_size or infer_flex_grid_size(normalized)
+    body_name = name or f"taxel_cube_{normalized}_r{grid_row}_c{grid_col}"
+    pos = spawn_pose_above_taxel(
+        spec,
+        flex_name=normalized,
+        grid_row=grid_row,
+        grid_col=grid_col,
+        grid_size=(n_cols, n_rows),
+        half_size=half_size,
+        clearance=clearance,
+        offset=offset,
+    )
+    return add_cube(
+        spec,
+        name=body_name,
+        pos=pos,
+        quat=quat,
+        half_size=half_size,
+        mass=mass,
+        rgba=rgba,
+        contype=contype,
+        conaffinity=conaffinity,
+        freejoint=freejoint,
+        joint_name=joint_name,
+        above_palm=False,
+    )
 
 
 def spawn_pose_above_palm(

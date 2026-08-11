@@ -1,0 +1,126 @@
+<?xml version="1.0" ?>
+<robot name="xela_finger_generated">
+
+  <link name="rf_mcp">
+    <inertial>
+      <origin xyz="0.0342889 -0.0265621 -0.0145004" rpy="0.0 0.0 0.0"/>
+      <mass value="0.044"/>
+      <inertia ixx="6.90801e-06" ixy="2.26365e-06" ixz="1.79475e-07" iyy="1.04766e-05" iyz="-1.82708e-07" izz="1.10431e-05"/>
+    </inertial>
+    <visual>
+      <origin xyz="0.0048 -0.0 -0.0145" rpy="1.5708 1.5708 0.0"/>
+      <geometry>
+        <mesh filename="package://assets/p4_unified.stl"/>
+      </geometry>
+      <material name="p4_unified_material">
+        <color rgba="0.972549 0.529412 0.00392157 1.0"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0.0048 -0.0 -0.0145" rpy="1.5708 1.5708 0.0"/>
+      <geometry>
+        <mesh filename="package://assets/p4_unified.stl"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="rf_pip">
+    <inertial>
+      <origin xyz="-0.000258994 0.00848001 0.0133488" rpy="0.0 0.0 0.0"/>
+      <mass value="0.032"/>
+      <inertia ixx="3.54425e-06" ixy="-1.6457e-08" ixz="-1.5221e-08" iyy="2.67248e-06" iyz="-1.71388e-07" izz="3.5384e-06"/>
+    </inertial>
+    <visual>
+      <origin xyz="0.0 0.0075 0.0" rpy="-1.5708 -1.5708 0.0"/>
+      <geometry>
+        <mesh filename="package://assets/p3_unified.stl"/>
+      </geometry>
+      <material name="p3_unified_material">
+        <color rgba="0.972549 0.529412 0.00392157 1.0"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0.0 0.0075 0.0" rpy="-1.5708 -1.5708 0.0"/>
+      <geometry>
+        <mesh filename="package://assets/p3_unified.stl"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="rf_dip">
+    <inertial>
+      <origin xyz="0.0304899 -0.00688132 -0.0146269" rpy="0.0 0.0 0.0"/>
+      <mass value="0.037"/>
+      <inertia ixx="8.11059e-06" ixy="5.66349e-07" ixz="1.88699e-07" iyy="6.98155e-06" iyz="-9.6344e-08" izz="9.0141e-06"/>
+    </inertial>
+    <visual>
+      <origin xyz="0.00905 -0.0 -0.0145" rpy="1.5708 1.5708 0.0"/>
+      <geometry>
+        <mesh filename="package://assets/p2_unified.stl"/>
+      </geometry>
+      <material name="p2_unified_material">
+        <color rgba="0.768627 0.886275 0.952941 1.0"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0.00905 -0.0 -0.0145" rpy="1.5708 1.5708 0.0"/>
+      <geometry>
+        <mesh filename="package://assets/p2_unified.stl"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="rf_fingertip">
+    <inertial>
+      <origin xyz="-0.00193531 -0.0359351 0.0145854" rpy="0.0 0.0 0.0"/>
+      <mass value="0.016"/>
+      <inertia ixx="1.0779e-05" ixy="1.57487e-07" ixz="-2.8587e-08" iyy="5.55855e-06" iyz="-1.64744e-07" izz="1.00656e-05"/>
+    </inertial>
+    <visual>
+      <origin xyz="-0.00135925 -0.025 0.0145" rpy="-1.5708 -1.5708 0.0"/>
+      <geometry>
+        <mesh filename="package://assets/fingertop_unfied.stl"/>
+      </geometry>
+      <material name="fingertop_unfied_material">
+        <color rgba="0.917647 0.917647 0.917647 1.0"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.00135925 -0.025 0.0145" rpy="-1.5708 -1.5708 0.0"/>
+      <geometry>
+        <mesh filename="package://assets/fingertop_unfied.stl"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <joint name="rf_rot" type="revolute">
+    <origin xyz="0.0326 -0.0123 -0.0145" rpy="-1.5708 -1.5708 0.0"/>
+    <parent link="rf_mcp"/>
+    <child link="rf_pip"/>
+    <axis xyz="0.0 0.0 1.0"/>
+    <limit effort="0.95" velocity="8.48" lower="-0.349" upper="0.349"/>
+  </joint>
+
+  <joint name="rf_pip" type="revolute">
+    <origin xyz="0.0145 0.015 0.013" rpy="1.5708 0.0 1.5708"/>
+    <parent link="rf_pip"/>
+    <child link="rf_dip"/>
+    <axis xyz="0.0 0.0 1.0"/>
+    <limit effort="0.95" velocity="8.48" lower="-0.262" upper="2.0944"/>
+  </joint>
+
+  <joint name="rf_dip" type="revolute">
+    <origin xyz="0.0361 0.0 -0.0291" rpy="0.0 0.0 1.5708"/>
+    <parent link="rf_dip"/>
+    <child link="rf_fingertip"/>
+    <axis xyz="0.0 0.0 1.0"/>
+    <limit effort="0.95" velocity="8.48" lower="-0.0873" upper="2.2689"/>
+  </joint>
+
+<link name="base"/>
+<joint name="base" type="fixed">
+  <origin xyz="0 0 0.2" rpy="1.57 0 0"/>
+  <parent link="base"/>
+  <child link="rf_mcp"/>
+</joint>
+</robot>
