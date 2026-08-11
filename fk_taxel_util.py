@@ -70,9 +70,14 @@ FLEX_TO_PALM_PATCH: dict[str, str] = {
     "flex_uspa46_2": "up_right",
     "flex_uspa46_3": "down_left",
 }
-# URDF link whose calibrated frame is 180° in-plane vs the MuJoCo flex mesh
-# (``SensorDefinition.flip_in_plane`` in ``generatehand_flexcom_sensor.py``).
+# URDF links whose local taxel grid is mirrored vs the MuJoCo flex mesh so that
+# FK left/right matches the simulated pad (and hardware taxel placement).
 FK_FLIP_IN_PLANE_LINKS = frozenset({"ahr_palm_2_4x6_palm_link"})
+# Finger 4x4 pads: FK row axis is mirrored across the finger relative to MuJoCo
+# (IF/RF sides swapped). Flip local ``yy`` only — see get_fk_taxel_frames.
+FK_FLIP_Y_LINKS = frozenset(
+    name for name in XELA_FLATTEN_ORDER if "4x4" in name
+)
 # MuJoCo flex name -> (finger, JSON patch, is_tip).  ``px``/``md`` geom names are
 # swapped vs JSON ``second``/``third`` on IF/MF/RF; map by actual taxel ownership.
 FLEX_TO_FINGER_PATCH: dict[str, tuple[str, str, bool]] = {
@@ -454,6 +459,10 @@ def get_fk_taxel_frames(
             # uspa46_2 is mounted 180° in-plane; mirror the patch frame so FK
             # taxel layout matches the MuJoCo flex mesh (flip_in_plane).
             xx = xx.max() + xx.min() - xx
+            yy = yy.max() + yy.min() - yy
+        elif link_name in FK_FLIP_Y_LINKS:
+            # Finger 4x4: reverse across-finger local axis so IF/RF sides match
+            # MuJoCo (otherwise FK lights the mirrored left/right corner).
             yy = yy.max() + yy.min() - yy
         sensor_local = np.stack([xx.flatten(), yy.flatten()], axis=-1)
         sensor_local = np.concatenate([sensor_local, np.zeros_like(sensor_local)], axis=-1)

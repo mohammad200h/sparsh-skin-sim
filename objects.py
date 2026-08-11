@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Sequence
+from typing import Callable, Sequence
 
 import mujoco as mj
 import numpy as np
@@ -23,10 +23,17 @@ DEFAULT_TAXEL_CUBE_HALF_SIZE = 0.005  # 2.5 mm cube (was 1 cm / 4)
 DEFAULT_TAXEL_CUBE_MASS = 0.01  # kg (was 0.5 × 4)
 DEFAULT_TAXEL_CUBE_RGBA = (0.95, 0.25, 0.20, 1.0)
 DEFAULT_TAXEL_CUBE_CLEARANCE = 0.03  # gap above taxel surface when spawning
+# Sticky cube welded to a taxel vertex (fingertip probe defaults).
+DEFAULT_STICKY_CUBE_HALF_SIZE = 0.008 / 3.5  # ~2.3 mm half-extent (~4.6 mm cube)
+DEFAULT_STICKY_CUBE_MASS = 0.02  # kg
+DEFAULT_STICKY_CUBE_RGBA = (0.20, 0.75, 0.35, 1.0)
+DEFAULT_STICKY_CUBE_CLEARANCE = 0.0  # cube just touches the taxel surface
 # Regular pad grids: (n_cols, n_rows), matching SensorDefinition.count[:2].
+# Fingertip pads use a sparse 6×6 FK canvas (30 active taxels).
 FLEX_GRID_SIZES: dict[str, tuple[int, int]] = {
     "uspa46": (6, 4),
     "uspa44": (4, 4),
+    "tip": (6, 6),
 }
 # Bit 1 for rigid contacts; affinity bit 2 so the cube collides with flex skins
 # (flex contype/conaffinity = 2) and the floor (also bit 2).
@@ -185,20 +192,44 @@ def spawn_pose_above_flex(
 
 
 def infer_flex_grid_size(flex_name: str) -> tuple[int, int]:
-    """Return ``(n_cols, n_rows)`` for a regular-grid flex pad.
+    """Return ``(n_cols, n_rows)`` for a flex pad FK grid.
 
-    Examples: ``uspa46`` → ``(6, 4)`` (4 rows × 6 columns), ``uspa44`` →
-    ``(4, 4)``.
+    Examples: ``uspa46`` → ``(6, 4)``, ``uspa44`` → ``(4, 4)``,
+    ``mf_tip`` → ``(6, 6)`` (sparse fingertip canvas).
     """
     normalized = _normalize_flex_name(flex_name)
-    for key, size in FLEX_GRID_SIZES.items():
+    # Prefer specific pad patterns over the shared ``tip`` substring.
+    for key in ("uspa46", "uspa44", "tip"):
         if key in normalized:
-            return size
+            return FLEX_GRID_SIZES[key]
     raise ValueError(
         f"Cannot infer grid size for flex '{flex_name}'. "
         f"Known patterns: {', '.join(FLEX_GRID_SIZES)}. "
         "Pass ``grid_size=(n_cols, n_rows)`` explicitly."
     )
+
+
+def taxel_vertex_body_name(
+    spec: mj.MjSpec,
+    *,
+    flex_name: str,
+    grid_row: int,
+    grid_col: int,
+) -> tuple[str, int, int]:
+    """Resolve FK grid cell → ``(vertex_body_name, vertex_index, taxel_id)``."""
+    normalized = _normalize_flex_name(flex_name)
+    model = spec.compile()
+    vertex_index, taxel_id = flex_vertex_for_fk_grid(
+        model, normalized, grid_row, grid_col
+    )
+    body_ids = flex_vertex_body_ids(model, normalized)
+    body_id = int(body_ids[vertex_index])
+    body_name = mj.mj_id2name(model, mj.mjtObj.mjOBJ_BODY, body_id)
+    if body_name is None:
+        raise ValueError(
+            f"Flex '{normalized}' vertex {vertex_index} has no named body"
+        )
+    return body_name, int(vertex_index), int(taxel_id)
 
 
 def flex_grid_vertex_index(
@@ -246,6 +277,32 @@ def flex_taxel_pose(
     return position, normal
 
 
+def flex_taxel_frame(
+    model: mj.MjModel,
+    data: mj.MjData,
+    flex_name: str,
+    vertex_index: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """World-frame position and orientation quat (wxyz) for one flex vertex."""
+    fid = flex_id(model, flex_name)
+    adr = int(model.flex_vertadr[fid])
+    n = int(model.flex_vertnum[fid])
+    if not (0 <= vertex_index < n):
+        raise ValueError(
+            f"vertex_index must be in [0, {n}), got {vertex_index} "
+            f"for flex '{flex_name}'"
+        )
+
+    position = np.asarray(
+        data.flexvert_xpos[adr + vertex_index], dtype=np.float64
+    )
+    body_ids = flex_vertex_body_ids(model, flex_name)
+    body_id = int(body_ids[vertex_index])
+    quat = np.empty(4, dtype=np.float64)
+    mj.mju_mat2Quat(quat, data.xmat[body_id])
+    return position, quat
+
+
 def spawn_pose_above_taxel(
     spec: mj.MjSpec,
     *,
@@ -256,8 +313,16 @@ def spawn_pose_above_taxel(
     half_size: float | Sequence[float] = DEFAULT_TAXEL_CUBE_HALF_SIZE,
     clearance: float = DEFAULT_TAXEL_CUBE_CLEARANCE,
     offset: Sequence[float] = (0.0, 0.0, 0.0),
-) -> np.ndarray:
-    """Cube centre above one taxel on a regular-grid flex pad."""
+    configure: Callable[[mj.MjModel, mj.MjData], None] | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Cube centre and orientation above one taxel.
+
+    Returns
+    -------
+    pos, quat:
+        World-frame centre and taxel-aligned quaternion (wxyz). ``offset`` is
+        applied in the taxel-local frame (same convention as sticky cubes).
+    """
     size = np.asarray(half_size, dtype=np.float64).reshape(-1)
     if size.size == 1:
         extent_z = float(size[0])
@@ -271,18 +336,26 @@ def spawn_pose_above_taxel(
         raise ValueError(f"offset must be length-3 (xyz), got {offset!r}")
 
     normalized = _normalize_flex_name(flex_name)
-    n_cols, n_rows = grid_size or infer_flex_grid_size(normalized)
+    _ = grid_size or infer_flex_grid_size(normalized)
 
     model = spec.compile()
     data = mj.MjData(model)
+    if configure is not None:
+        configure(model, data)
     mj.mj_forward(model, data)
     vertex_index, _taxel_id = flex_vertex_for_fk_grid(
         model, normalized, grid_row, grid_col
     )
 
-    position, normal = flex_taxel_pose(model, data, normalized, vertex_index)
-    centre = position + normal * (extent_z + float(clearance)) + delta
-    return np.asarray(centre, dtype=np.float64)
+    position, quat = flex_taxel_frame(model, data, normalized, vertex_index)
+    rotation = np.empty(9, dtype=np.float64)
+    mj.mju_quat2Mat(rotation, quat)
+    rotation = rotation.reshape(3, 3)
+    local = np.array(
+        [0.0, 0.0, extent_z + float(clearance)], dtype=np.float64
+    ) + delta
+    centre = position + rotation @ local
+    return np.asarray(centre, dtype=np.float64), np.asarray(quat, dtype=np.float64)
 
 
 def add_cube_on_taxel(
@@ -293,7 +366,7 @@ def add_cube_on_taxel(
     grid_col: int,
     name: str | None = None,
     grid_size: tuple[int, int] | None = None,
-    quat: Sequence[float] = DEFAULT_CUBE_QUAT,
+    quat: Sequence[float] | None = None,
     half_size: float | Sequence[float] = DEFAULT_TAXEL_CUBE_HALF_SIZE,
     mass: float = DEFAULT_TAXEL_CUBE_MASS,
     rgba: Sequence[float] = DEFAULT_TAXEL_CUBE_RGBA,
@@ -303,6 +376,7 @@ def add_cube_on_taxel(
     joint_name: str | None = None,
     clearance: float = DEFAULT_TAXEL_CUBE_CLEARANCE,
     offset: Sequence[float] = (0.0, 0.0, 0.0),
+    configure: Callable[[mj.MjModel, mj.MjData], None] | None = None,
 ) -> mj.MjsBody:
     """Spawn a small, heavy cube above one taxel on a regular-grid flex pad.
 
@@ -316,17 +390,22 @@ def add_cube_on_taxel(
     grid_size:
         Optional ``(n_cols, n_rows)`` override when the flex name does not
         match a known pattern.
+    quat:
+        World orientation (wxyz). If ``None``, matches the taxel frame.
     half_size, mass:
         Defaults are a 2.5 mm cube with 2.0 kg mass (dense point load).
     clearance:
         Gap between the flex surface and the cube bottom along the taxel normal.
     offset:
-        Extra world-frame XYZ shift applied after placement on the taxel.
+        Extra taxel-local XYZ shift (same convention as sticky cubes).
+    configure:
+        Optional ``(model, data) -> None`` applied before reading taxel pose
+        (e.g. set joint/actuator initials so spawn matches the demo pose).
     """
     normalized = _normalize_flex_name(flex_name)
     n_cols, n_rows = grid_size or infer_flex_grid_size(normalized)
     body_name = name or f"taxel_cube_{normalized}_r{grid_row}_c{grid_col}"
-    pos = spawn_pose_above_taxel(
+    pos, taxel_quat = spawn_pose_above_taxel(
         spec,
         flex_name=normalized,
         grid_row=grid_row,
@@ -335,12 +414,13 @@ def add_cube_on_taxel(
         half_size=half_size,
         clearance=clearance,
         offset=offset,
+        configure=configure,
     )
     return add_cube(
         spec,
         name=body_name,
         pos=pos,
-        quat=quat,
+        quat=taxel_quat if quat is None else quat,
         half_size=half_size,
         mass=mass,
         rgba=rgba,
@@ -350,6 +430,94 @@ def add_cube_on_taxel(
         joint_name=joint_name,
         above_palm=False,
     )
+
+
+def add_sticky_cube_on_taxel(
+    spec: mj.MjSpec,
+    *,
+    flex_name: str,
+    grid_row: int,
+    grid_col: int,
+    name: str | None = None,
+    half_size: float | Sequence[float] = DEFAULT_STICKY_CUBE_HALF_SIZE,
+    mass: float = DEFAULT_STICKY_CUBE_MASS,
+    rgba: Sequence[float] = DEFAULT_STICKY_CUBE_RGBA,
+    contype: int = DEFAULT_CUBE_CONTYPE,
+    conaffinity: int = DEFAULT_CUBE_CONAFFINITY,
+    clearance: float = DEFAULT_STICKY_CUBE_CLEARANCE,
+    offset: Sequence[float] = (0.0, 0.0, 0.0),
+) -> mj.MjsBody:
+    """Attach a cube to one flex taxel so it stays stuck as the pad moves.
+
+    The cube is a child of the taxel vertex body, offset along the local
+    outward normal (+z). Intended for fingertip pads (``mf_tip``, ``if_tip``,
+    …) but works for any flex that maps through ``flex_vertex_for_fk_grid``.
+
+    Parameters
+    ----------
+    flex_name:
+        Flex to target, e.g. ``\"mf_tip\"`` or ``\"flex_mf_tip\"``.
+    grid_row, grid_col:
+        FK panel cell (0-indexed). Fingertips use a sparse 6×6 canvas.
+    half_size, mass:
+        Defaults are a ~4.6 mm cube with 20 g mass.
+    clearance:
+        Extra gap along the taxel normal beyond ``half_size[2]`` (0 → just touching).
+    offset:
+        Extra shift in the taxel-local frame (x shear, y shear, z normal).
+    """
+    size = np.asarray(half_size, dtype=np.float64).reshape(-1)
+    if size.size == 1:
+        size = np.repeat(size, 3)
+    elif size.size != 3:
+        raise ValueError(f"half_size must be a scalar or length-3, got {half_size!r}")
+    if np.any(size <= 0.0):
+        raise ValueError(f"half_size must be > 0, got {half_size!r}")
+
+    delta = np.asarray(offset, dtype=np.float64).reshape(-1)
+    if delta.size != 3:
+        raise ValueError(f"offset must be length-3 (xyz), got {offset!r}")
+
+    normalized = _normalize_flex_name(flex_name)
+    vertex_body_name, _vertex_index, taxel_id = taxel_vertex_body_name(
+        spec,
+        flex_name=normalized,
+        grid_row=grid_row,
+        grid_col=grid_col,
+    )
+    parent = spec.body(vertex_body_name)
+    if parent is None:
+        raise ValueError(f"Vertex body '{vertex_body_name}' not found in spec")
+
+    body_name = name or (
+        f"sticky_cube_{normalized}_r{grid_row}_c{grid_col}"
+        if taxel_id < 0
+        else f"sticky_cube_taxel_{taxel_id:03d}"
+    )
+    if spec.body(body_name) is not None:
+        raise ValueError(f"Body '{body_name}' already exists in the spec")
+
+    local_pos = np.array(
+        [0.0, 0.0, float(size[2]) + float(clearance)], dtype=np.float64
+    ) + delta
+
+    body = parent.add_body(
+        name=body_name,
+        pos=local_pos.tolist(),
+    )
+    body.add_geom(
+        name=body_name,
+        type=mj.mjtGeom.mjGEOM_BOX,
+        size=size.tolist(),
+        mass=float(mass),
+        rgba=np.asarray(rgba, dtype=np.float64).tolist(),
+        contype=int(contype),
+        conaffinity=int(conaffinity),
+        condim=3,
+        friction=[0.8, 0.005, 0.0001],
+        group=0,
+    )
+    return body
 
 
 def spawn_pose_above_palm(

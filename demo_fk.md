@@ -92,8 +92,12 @@ empty. Picking an empty cell raises an error.
 | `uspa46_2` | Palm pad (up-right patch) |
 | `uspa46_3` | Palm pad (down-left patch) |
 
-**Note on `uspa46_2`:** This sensor is mounted **180° in-plane** relative to the
-other palm pads. FK positions for this patch are mirrored in
+**Note on finger 4×4 pads:** FK local ``yy`` is flipped for all `*4x4*` URDF
+links so the IF/RF sides match MuJoCo (otherwise a cube on the right of a pad
+lights the left corner in Open3D).
+
+**Note on `uspa46_2`:** This palm sensor is mounted **180° in-plane** relative to
+the other palm pads. FK positions for this patch are mirrored in
 `fk_taxel_util.get_fk_taxel_frames` so the Open3D layout matches the MuJoCo flex
 mesh. Grid `(row, col)` still follows the FK panel — no extra flags needed.
 

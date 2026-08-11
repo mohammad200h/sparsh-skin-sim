@@ -20,6 +20,7 @@ from fk_taxel_util import (
 )
 from objects import (
     add_cube_on_taxel,
+    add_sticky_cube_on_taxel,
     add_tetris_part,
     infer_flex_grid_size,
 )
@@ -35,6 +36,22 @@ SCENE_XML = (
 # Match the flex-sensor generator: the shipped MJX XML keeps iterations=5,
 # which under-converges the soft skins so contact barely moves the joints.
 SOLVER_ITERATIONS = 50
+TH_AXL_ACT_INITIAL = 1.6
+
+
+def _set_actuator_initial(
+    model: mj.MjModel,
+    data: mj.MjData,
+    actuator_name: str,
+    value: float,
+) -> None:
+    """Set ``ctrl`` and linked joint ``qpos`` so the pose starts at ``value``."""
+    act_id = mj.mj_name2id(model, mj.mjtObj.mjOBJ_ACTUATOR, actuator_name)
+    if act_id < 0:
+        raise ValueError(f"Actuator '{actuator_name}' not found")
+    joint_id = int(model.actuator_trnid[act_id, 0])
+    data.ctrl[act_id] = float(value)
+    data.qpos[int(model.jnt_qposadr[joint_id])] = float(value)
 
 
 def parse_args() -> argparse.Namespace:
@@ -61,7 +78,8 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Target flex for object spawn (e.g. mf_tip or flex_uspa46_1). "
-            "With --taxel-row/--taxel-col: drop a heavy cube on that taxel. "
+            "With --taxel-row/--taxel-col: drop a cube on that taxel "
+            "(use --sticky to weld it). "
             "Otherwise: tetris piece above this flex (default: all palm pads)."
         ),
     )
@@ -78,10 +96,25 @@ def parse_args() -> argparse.Namespace:
         help="Taxel grid column (0-indexed). Requires --flex and --taxel-row.",
     )
     parser.add_argument(
+        "--sticky",
+        action="store_true",
+        default=False,
+        help=(
+            "Weld the taxel cube to the vertex body (default: free-falling cube). "
+            "Requires --taxel-row/--taxel-col."
+        ),
+    )
+    parser.add_argument(
         "--taxel-mass",
         type=float,
         default=None,
-        help="Mass of the taxel cube in kg (default: 2.0)",
+        help="Mass of the taxel cube in kg",
+    )
+    parser.add_argument(
+        "--cube-half-size",
+        type=float,
+        default=None,
+        help="Taxel cube half-extent in metres",
     )
     parser.add_argument(
         "--scale",
@@ -95,7 +128,10 @@ def parse_args() -> argparse.Namespace:
         nargs=3,
         metavar=("DX", "DY", "DZ"),
         default=(0.0, 0.0, 0.0),
-        help="XYZ offset added to the flex/palm spawn centre (metres)",
+        help=(
+            "XYZ offset added to spawn pose (metres). "
+            "Taxel cubes (sticky or free): taxel-local frame; tetris: world frame."
+        ),
     )
     parser.add_argument(
         "--no-fk-viz",
@@ -110,6 +146,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--taxel-row and --taxel-col must be given together")
     if args.taxel_row is not None and args.flex is None:
         parser.error("--flex is required when placing a cube on a taxel")
+    if args.sticky and args.taxel_row is None:
+        parser.error("--sticky requires --taxel-row and --taxel-col")
     return args
 
 
@@ -141,9 +179,23 @@ def main() -> None:
         }
         if args.taxel_mass is not None:
             cube_kwargs["mass"] = args.taxel_mass
-        piece = add_cube_on_taxel(spec, **cube_kwargs)
+        if args.cube_half_size is not None:
+            cube_kwargs["half_size"] = args.cube_half_size
+        if args.sticky:
+            piece = add_sticky_cube_on_taxel(spec, **cube_kwargs)
+            mode = "sticky cube"
+        else:
+            # Spawn against the same initial hand pose used after compile
+            # (sticky cubes follow the taxel; free cubes need the posed location).
+            cube_kwargs["configure"] = (
+                lambda model, data: _set_actuator_initial(
+                    model, data, "th_axl_act", TH_AXL_ACT_INITIAL
+                )
+            )
+            piece = add_cube_on_taxel(spec, **cube_kwargs)
+            mode = "taxel cube"
         print(
-            f"  taxel cube spawn pos={tuple(np.round(piece.pos, 4))} "
+            f"  {mode} pos={tuple(np.round(piece.pos, 4))} "
             f"name={piece.name} flex={args.flex} "
             f"grid=({args.taxel_row}, {args.taxel_col}) "
             f"size={n_rows}x{n_cols} vertex={vertex_index} taxel={taxel_id} "
@@ -169,6 +221,7 @@ def main() -> None:
     model.opt.iterations = SOLVER_ITERATIONS
     model.opt.tolerance = 0.0
     data = mj.MjData(model)
+    _set_actuator_initial(model, data, "th_axl_act", TH_AXL_ACT_INITIAL)
     mj.mj_forward(model, data)
 
     print(f"Loaded: {SCENE_XML.name}")
@@ -176,10 +229,16 @@ def main() -> None:
     print(f"  flexes ({model.nflex}): {', '.join(list_flex_names(model))}")
     print(f"  visualize_force={visualize_force}")
     if use_taxel_cube:
-        print(
-            "  Tip: cube falls onto the chosen taxel; compare MuJoCo flex colours "
-            "with the Open3D FK panel at the same grid cell."
-        )
+        if args.sticky:
+            print(
+                "  Tip: sticky cube is welded to the chosen taxel; compare MuJoCo flex "
+                "colours with the Open3D FK panel at the same grid cell."
+            )
+        else:
+            print(
+                "  Tip: cube falls onto the chosen taxel; compare MuJoCo flex colours "
+                "with the Open3D FK panel at the same grid cell."
+            )
     else:
         print("  Tip: pause the viewer (space) then drag the tetris piece onto a pad/tip.")
 
