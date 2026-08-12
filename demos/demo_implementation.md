@@ -1,7 +1,7 @@
 # Demo Implementation Notes
 
 This document explains the flex-sensing demo and documents the public APIs in
-`util/objects_util.py`, `util/flex_util.py`, `util/flex_visualizer.py`, and `demo.py`.
+`util/objects_util.py`, `util/flex_util.py`, `util/flex_visualizer.py`, and `demos/demo.py`.
 
 ## Files
 
@@ -11,14 +11,14 @@ This document explains the flex-sensing demo and documents the public APIs in
 | `util/objects_util.py` | Add free bodies to the scene via `MjSpec` (cube / tetrominoes) |
 | `util/flex_util.py` | Flex topology, displacements, Kelvin–Voigt force estimation |
 | `util/flex_visualizer.py` | Live matplotlib plots for displacement / force |
-| `demo.py` | Loads scene, spawns a tetris piece, runs MuJoCo + visualizer |
+| `demos/demo.py` | Loads scene, spawns a tetris piece, runs MuJoCo + visualizer |
 
 Run:
 
 ```bash
-poetry run python3 demo.py
-poetry run python3 demo.py --visualize-force
-poetry run python3 demo.py --flex flex_uspa46_1 --scale 2.0
+poetry run python3 demos/demo.py
+poetry run python3 demos/demo.py --visualize-force
+poetry run python3 demos/demo.py --flex flex_uspa46_1 --scale 2.0
 ```
 
 CLI flags:
@@ -394,7 +394,7 @@ Factory for `AllFlexLiveVisualizer`.
 
 ---
 
-## `demo.py`
+## `demos/demo.py`
 
 ### `SCENE_XML`
 

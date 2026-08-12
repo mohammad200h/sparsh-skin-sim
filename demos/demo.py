@@ -3,23 +3,16 @@
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
 import time
 
 import mujoco as mj
 import mujoco.viewer
 import numpy as np
 
+from _bootstrap import SCENE_XML
 from util.flex_visualizer import visualize_all_flexes_live
 from util.flex_util import AllFlexForceEstimator, list_flex_names
 from util.objects_util import add_tetris_part
-
-
-SCENE_XML = (
-    Path(__file__).resolve().parent
-    / "leapXELA_model"
-    / "scene_mjx_cube_CoACD_mjx_flex_sensor.xml"
-)
 
 # Match the flex-sensor generator: the shipped MJX XML keeps iterations=5,
 # which under-converges the soft skins so contact barely moves the joints.

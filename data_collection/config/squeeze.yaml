@@ -1,0 +1,26 @@
+collection:
+  episodes: 10
+  duration: 10.0
+  output_dir: data/squeeze
+  seed: 0
+
+env:
+  n_substeps: 5
+  spawn_tetris: true
+  tetris_shape: T
+  tetris_scale: 1
+  tetris_offset: [0.0, 0.0, 0.0]
+  tetris_flex: null
+  joint_movement_threshold: 1.0e-3
+  render: true
+
+policy:
+  grasp_pattern: squeeze
+  grip_fraction: 0.85
+  thumb_grip_fraction: 0.35
+  pregrip_fraction: 0.40
+  thumb_delay: 0.5
+  pulse_hz: 1.0
+  pulse_amplitude: 0.15
+  shear_amplitude: 0.15
+  squeeze_steps: 4

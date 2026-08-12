@@ -1,0 +1,30 @@
+collection:
+  episodes: 10
+  duration: 5.0
+  output_dir: data/finger_close
+  seed: 0
+
+env:
+  n_substeps: 5
+  spawn_tetris: true
+  tetris_shape: T
+  tetris_scale: 1.0
+  tetris_offset: [0.0, 0.0, 0.0]
+  tetris_flex: null
+  joint_movement_threshold: 1.0e-3
+  domain_randomization:
+    enabled: false
+    shape: [T, I, O, S]
+    scale: [0.6, 0.8, 0.9, 1.0]
+    offset: [0.0, 0.0, 0.0]
+    flex: [null, null, null, null]
+  render: true
+  num_envs: 4
+
+policy:
+  grasp_pattern: finger_close
+  close_duration: 1.0
+  mcp_target: 1.6
+  pip_target: 1.5
+  dip_target: 0.9
+  hold_after_close: true

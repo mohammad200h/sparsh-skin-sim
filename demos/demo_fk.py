@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
 import time
 
 import mujoco as mj
 import mujoco.viewer
 import numpy as np
 
+from _bootstrap import SCENE_XML
 from util.flex_visualizer import visualize_all_flexes_live
 from util.flex_util import AllFlexForceEstimator, list_flex_names
 from util.fk_taxel_util import (
@@ -24,13 +24,6 @@ from util.objects_util import (
     add_sticky_cube_on_taxel,
     add_tetris_part,
     infer_flex_grid_size,
-)
-
-
-SCENE_XML = (
-    Path(__file__).resolve().parent
-    / "leapXELA_model"
-    / "scene_mjx_cube_CoACD_mjx_flex_sensor.xml"
 )
 
 # Match the flex-sensor generator: the shipped MJX XML keeps iterations=5,

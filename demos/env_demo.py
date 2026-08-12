@@ -8,6 +8,7 @@ import time
 import mujoco.viewer
 import numpy as np
 
+import _bootstrap  # noqa: F401
 from env import LeapFlexEnv
 
 

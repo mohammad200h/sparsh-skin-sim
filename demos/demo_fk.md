@@ -1,4 +1,4 @@
-# `demo_fk.py` — Flex sensor demo with FK taxel visualization
+# `demos/demo_fk.py` — Flex sensor demo with FK taxel visualization
 
 Interactive demo that loads the Leap+XELA hand with soft flex skins, optionally
 drops a test object on a chosen taxel, and runs **two** live views:
@@ -15,16 +15,16 @@ cell** in MuJoCo and in the FK visualizer.
 
 ```bash
 # Tetris piece above palm (default)
-poetry run python3 demo_fk.py
+poetry run python3 demos/demo_fk.py
 
 # Heavy cube on one palm taxel
-poetry run python3 demo_fk.py --flex uspa46_1 --taxel-row 1 --taxel-col 2
+poetry run python3 demos/demo_fk.py --flex uspa46_1 --taxel-row 1 --taxel-col 2
 
 # Middle-finger proximal pad, centre cell
-poetry run python3 demo_fk.py --flex mf_px_uspa44 --taxel-row 1 --taxel-col 1
+poetry run python3 demos/demo_fk.py --flex mf_px_uspa44 --taxel-row 1 --taxel-col 1
 
 # Middle fingertip
-poetry run python3 demo_fk.py --flex mf_tip --taxel-row 2 --taxel-col 2
+poetry run python3 demos/demo_fk.py --flex mf_tip --taxel-row 2 --taxel-col 2
 ```
 
 ---
@@ -141,7 +141,7 @@ row\col   0    1    2    3    4    5
 Example — centre of the active region:
 
 ```bash
-poetry run python3 demo_fk.py --flex mf_tip --taxel-row 2 --taxel-col 2
+poetry run python3 demos/demo_fk.py --flex mf_tip --taxel-row 2 --taxel-col 2
 # → taxel 246
 ```
 
@@ -150,7 +150,7 @@ poetry run python3 demo_fk.py --flex mf_tip --taxel-row 2 --taxel-col 2
 ## Validation workflow
 
 1. Pick a flex and grid cell, e.g. `--flex uspa46_1 --taxel-row 0 --taxel-col 0`
-2. Run `demo_fk.py` and let the cube settle on the pad
+2. Run `demos/demo_fk.py` and let the cube settle on the pad
 3. In **MuJoCo**, check the flex heatmap (force mode) at the contact location
 4. In **Open3D**, check the highlighted taxel on the matching palm/finger patch
 5. Compare startup line: `grid=(row, col) … taxel=NNN` with the hot cell in Open3D
@@ -213,13 +213,13 @@ model = spec.compile()
 
 | File | Role |
 |------|------|
-| `demo_fk.py` | This demo (MuJoCo + FK Open3D) |
-| `demo.py` | Same spawn options, no FK visualizer |
+| `demos/demo_fk.py` | This demo (MuJoCo + FK Open3D) |
+| `demos/demo.py` | Same spawn options, no FK visualizer |
 | `util/objects_util.py` | `add_cube_on_taxel`, `spawn_pose_above_taxel`, tetris helpers |
 | `util/fk_taxel_util.py` | FK taxel frames, grid→vertex mapping, Open3D visualizer |
 | `util/flex_util.py` | Kelvin–Voigt force estimation |
 | `util/flex_visualizer.py` | Live MuJoCo flex heatmaps |
-| `demo_implementation.md` | Deeper API notes for util.flex_util / util.objects_util / demo.py |
+| `demos/demo_implementation.md` | Deeper API notes for util.flex_util / util.objects_util / demos/demo.py |
 
 Scene XML:
 
@@ -231,19 +231,19 @@ Scene XML:
 
 ```bash
 # Palm corner cell
-poetry run python3 demo_fk.py --flex uspa46_2 --taxel-row 0 --taxel-col 0
+poetry run python3 demos/demo_fk.py --flex uspa46_2 --taxel-row 0 --taxel-col 0
 
 # Sweep a row on a 4×4 finger pad
-poetry run python3 demo_fk.py --flex mf_md_uspa44 --taxel-row 2 --taxel-col 0
-poetry run python3 demo_fk.py --flex mf_md_uspa44 --taxel-row 2 --taxel-col 3
+poetry run python3 demos/demo_fk.py --flex mf_md_uspa44 --taxel-row 2 --taxel-col 0
+poetry run python3 demos/demo_fk.py --flex mf_md_uspa44 --taxel-row 2 --taxel-col 3
 
 # Heavier cube, slight vertical offset
-poetry run python3 demo_fk.py --flex mf_tip --taxel-row 3 --taxel-col 3 \
+poetry run python3 demos/demo_fk.py --flex mf_tip --taxel-row 3 --taxel-col 3 \
   --taxel-mass 1.0 --offset 0 0 0.005
 
 # MuJoCo only (no Open3D)
-poetry run python3 demo_fk.py --flex uspa46_1 --taxel-row 1 --taxel-col 1 --no-fk-viz
+poetry run python3 demos/demo_fk.py --flex uspa46_1 --taxel-row 1 --taxel-col 1 --no-fk-viz
 
 # Classic tetris drop on middle fingertip
-poetry run python3 demo_fk.py --flex mf_tip --scale 1.2
+poetry run python3 demos/demo_fk.py --flex mf_tip --scale 1.2
 ```

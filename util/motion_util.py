@@ -49,6 +49,47 @@ def resolve_actuator_ids(
     )
 
 
+def _finger_close_closed_targets(
+    names: tuple[str, ...],
+    lo: np.ndarray,
+    hi: np.ndarray,
+    *,
+    mcp_target: float,
+    pip_target: float,
+    dip_target: float,
+) -> np.ndarray:
+    targets = np.empty(len(names), dtype=np.float64)
+    for i, name in enumerate(names):
+        if name.endswith("_mcp"):
+            targets[i] = mcp_target
+        elif name.endswith("_pip"):
+            targets[i] = pip_target
+        elif name.endswith("_dip"):
+            targets[i] = dip_target
+        else:
+            raise ValueError(
+                f"finger_close only supports mcp/pip/dip joints, got '{name}'"
+            )
+    return np.clip(targets, lo, hi)
+
+
+def _finger_close_ramped_values(
+    start: np.ndarray,
+    targets: np.ndarray,
+    elapsed: float,
+    duration: float,
+    *,
+    hold: bool,
+) -> np.ndarray:
+    duration = max(float(duration), 1e-6)
+    if elapsed < duration:
+        alpha = _smoothstep(elapsed / duration)
+        return start + alpha * (targets - start)
+    if hold:
+        return targets
+    return targets
+
+
 def finger_close_generator(
     model: mj.MjModel,
     data: mj.MjData,
@@ -88,19 +129,14 @@ def finger_close_generator(
     lo = model.actuator_ctrlrange[act_ids, 0].copy()
     hi = model.actuator_ctrlrange[act_ids, 1].copy()
 
-    targets = np.empty(len(names), dtype=np.float64)
-    for i, name in enumerate(names):
-        if name.endswith("_mcp"):
-            targets[i] = mcp_target
-        elif name.endswith("_pip"):
-            targets[i] = pip_target
-        elif name.endswith("_dip"):
-            targets[i] = dip_target
-        else:
-            raise ValueError(
-                f"finger_close_generator only supports mcp/pip/dip joints, got '{name}'"
-            )
-    targets = np.clip(targets, lo, hi)
+    targets = _finger_close_closed_targets(
+        names,
+        lo,
+        hi,
+        mcp_target=mcp_target,
+        pip_target=pip_target,
+        dip_target=dip_target,
+    )
 
     # Snapshot open pose at generator creation (usually zeros / current ctrl).
     start = data.ctrl[act_ids].copy()
@@ -109,12 +145,10 @@ def finger_close_generator(
 
     while True:
         elapsed = float(data.time) - t0
-        if elapsed < duration:
-            alpha = _smoothstep(elapsed / duration)
-            data.ctrl[act_ids] = start + alpha * (targets - start)
-        elif hold:
-            data.ctrl[act_ids] = targets
-        # else: leave ctrl as last commanded values
+        if elapsed < duration or hold:
+            data.ctrl[act_ids] = _finger_close_ramped_values(
+                start, targets, elapsed, duration, hold=hold
+            )
         yield
 
 
@@ -122,7 +156,18 @@ def finger_close_generator(
 # Grasp-pattern generators (actuator position targets over time)
 # ---------------------------------------------------------------------------
 
-GRASP_PATTERNS = ("hold", "pulse", "squeeze", "regrasp", "tap", "shear")
+GRASP_PATTERNS = (
+    "hold",
+    "pulse",
+    "squeeze",
+    "regrasp",
+    "tap",
+    "shear",
+    "finger_close",
+)
+
+# Match ``LeapFlexEnv`` reset for the undriven thumb axial joint.
+FINGER_CLOSE_TH_AXL = 1.6
 
 CLOSE_START = 0.0
 CLOSE_END = 1.5
@@ -166,6 +211,11 @@ class GraspProfile:
     pulse_amplitude: float
     shear_amplitude: float
     squeeze_steps: int
+    close_duration: float = DEFAULT_CLOSE_DURATION
+    mcp_target: float = DEFAULT_MCP_TARGET
+    pip_target: float = DEFAULT_PIP_TARGET
+    dip_target: float = DEFAULT_DIP_TARGET
+    hold_after_close: bool = True
 
 
 def default_grasp_profile(pattern: str) -> GraspProfile:
@@ -180,6 +230,11 @@ def default_grasp_profile(pattern: str) -> GraspProfile:
         pulse_amplitude=PULSE_AMPLITUDE,
         shear_amplitude=SHEAR_AMPLITUDE,
         squeeze_steps=SQUEEZE_STEPS,
+        close_duration=DEFAULT_CLOSE_DURATION,
+        mcp_target=DEFAULT_MCP_TARGET,
+        pip_target=DEFAULT_PIP_TARGET,
+        dip_target=DEFAULT_DIP_TARGET,
+        hold_after_close=True,
     )
     validate_profile(profile)
     return profile
@@ -209,6 +264,8 @@ def validate_profile(profile: GraspProfile) -> None:
         raise ValueError("shear_amplitude must be non-negative")
     if profile.squeeze_steps < 1:
         raise ValueError("squeeze_steps must be at least 1")
+    if profile.close_duration <= 0.0:
+        raise ValueError("close_duration must be positive")
 
 
 def pregrip_targets(
@@ -243,11 +300,61 @@ def lateral_mask(model: ActuatorModel) -> np.ndarray:
     )
 
 
+def finger_close_grasp_target(
+    model: mj.MjModel,
+    time_seconds: float,
+    profile: GraspProfile,
+    *,
+    joint_names: Iterable[str] = FINGER_CLOSE_JOINTS,
+    start_ctrl: np.ndarray | None = None,
+) -> np.ndarray:
+    """Return a full actuator target vector for the ``finger_close`` pattern."""
+    low = model.actuator_ctrlrange[:, 0]
+    high = model.actuator_ctrlrange[:, 1]
+
+    if start_ctrl is None:
+        targets = np.zeros(model.nu, dtype=np.float64)
+        th_axl_id = mj.mj_name2id(model, mj.mjtObj.mjOBJ_ACTUATOR, "th_axl_act")
+        if th_axl_id >= 0:
+            targets[th_axl_id] = np.clip(
+                FINGER_CLOSE_TH_AXL, low[th_axl_id], high[th_axl_id]
+            )
+    else:
+        targets = np.asarray(start_ctrl, dtype=np.float64).copy()
+
+    names = tuple(joint_names)
+    act_ids = resolve_actuator_ids(model, names)
+    lo = model.actuator_ctrlrange[act_ids, 0]
+    hi = model.actuator_ctrlrange[act_ids, 1]
+    closed = _finger_close_closed_targets(
+        names,
+        lo,
+        hi,
+        mcp_target=profile.mcp_target,
+        pip_target=profile.pip_target,
+        dip_target=profile.dip_target,
+    )
+    start = targets[act_ids].copy()
+    targets[act_ids] = _finger_close_ramped_values(
+        start,
+        closed,
+        time_seconds,
+        profile.close_duration,
+        hold=profile.hold_after_close,
+    )
+    return np.clip(targets, low, high)
+
+
 def grasp_target(
     model: ActuatorModel, time_seconds: float, profile: GraspProfile
 ) -> np.ndarray:
     """Return one actuator target vector for the requested simulation time."""
     validate_profile(profile)
+
+    if profile.pattern == "finger_close":
+        if not isinstance(model, mj.MjModel):
+            raise TypeError("finger_close requires a mujoco.MjModel")
+        return finger_close_grasp_target(model, time_seconds, profile)
 
     low = model.actuator_ctrlrange[:, 0]
     high = model.actuator_ctrlrange[:, 1]

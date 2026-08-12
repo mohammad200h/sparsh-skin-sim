@@ -10,6 +10,7 @@ import mujoco as mj
 import numpy as np
 from gymnasium import spaces
 
+from env.domain_randomization import DomainRandomizationConfig, TetrisSpawn
 from util.fk_taxel_util import (
     LEAP_JOINT_ORDER,
     N_TAXELS,
@@ -50,8 +51,15 @@ class LeapFlexEnv(gym.Env):
           ``positions``, ``rotations``, ``forces_local``, ``forces_world``,
           ``positions_deformed`` (all keyed by FK taxel order, 368 taxels)
 
-    Reward / termination are unused: reward is always ``0``, ``terminated`` and
-    ``truncated`` are always ``False``.
+    Reward is always ``0``. ``truncated`` is always ``False``. When
+    ``joint_movement_threshold`` is set, ``terminated`` becomes ``True`` once
+    the L2 norm of the per-step joint-angle change drops below that value
+    (radians).
+
+    Domain randomization varies tetris spawn parameters. With ``env_slot`` set
+    (vector env), the slot picks deterministically from the DR pools once at
+    startup. Without ``env_slot``, a new spawn is sampled from the pools on
+    every ``reset()``.
     """
 
     metadata = {"render_modes": []}
@@ -69,32 +77,78 @@ class LeapFlexEnv(gym.Env):
         tetris_scale: float = 1.5,
         tetris_offset: tuple[float, float, float] = (0.0, 0.0, 0.0),
         tetris_flex: str | None = None,
+        joint_movement_threshold: float | None = None,
+        domain_randomization: DomainRandomizationConfig | None = None,
+        env_slot: int | None = None,
     ) -> None:
         super().__init__()
-        xml_path = Path(scene_xml) if scene_xml is not None else SCENE_XML
-        if not xml_path.is_file():
-            raise FileNotFoundError(f"Scene not found: {xml_path}")
+        self._scene_xml = Path(scene_xml) if scene_xml is not None else SCENE_XML
+        if not self._scene_xml.is_file():
+            raise FileNotFoundError(f"Scene not found: {self._scene_xml}")
 
         self._n_substeps = int(n_substeps)
         if self._n_substeps < 1:
             raise ValueError("n_substeps must be >= 1")
 
-        spec = mj.MjSpec.from_file(xml_path.as_posix())
+        self._solver_iterations = int(solver_iterations)
+        self._th_axl_initial = float(th_axl_initial)
+        self._force_window = int(force_window)
+        self._spawn_tetris = bool(spawn_tetris)
+        self._default_spawn = TetrisSpawn(
+            shape=str(tetris_shape),
+            scale=float(tetris_scale),
+            offset=tuple(float(v) for v in tetris_offset),
+            flex=tetris_flex,
+        )
+        self._domain_randomization = domain_randomization
+        self._env_slot = env_slot
+        self._randomize_on_reset = (
+            self._spawn_tetris
+            and self._domain_randomization is not None
+            and self._env_slot is None
+        )
+
+        if joint_movement_threshold is not None and joint_movement_threshold < 0:
+            raise ValueError("joint_movement_threshold must be >= 0")
+        self._joint_movement_threshold = joint_movement_threshold
+        self._prev_joint_angles: np.ndarray | None = None
         self._tetris_body_name: str | None = None
-        if spawn_tetris:
+        self._current_spawn = self._default_spawn
+
+        self._compile_scene(self._resolve_spawn(None))
+
+    @property
+    def tetris_spawn(self) -> dict[str, Any]:
+        return self._current_spawn.as_dict()
+
+    def _resolve_spawn(self, rng: np.random.Generator | None) -> TetrisSpawn:
+        if not self._spawn_tetris or self._domain_randomization is None:
+            return self._default_spawn
+        if self._env_slot is not None:
+            return self._domain_randomization.for_slot(self._env_slot)
+        if rng is None:
+            return self._domain_randomization.sample(
+                np.random.default_rng()
+            )
+        return self._domain_randomization.sample(rng)
+
+    def _compile_scene(self, spawn: TetrisSpawn) -> None:
+        spec = mj.MjSpec.from_file(self._scene_xml.as_posix())
+        self._tetris_body_name = None
+        if self._spawn_tetris:
             piece = add_tetris_part(
                 spec,
-                shape=tetris_shape,
-                above_palm=tetris_flex is None,
-                flex_name=tetris_flex,
-                scale=tetris_scale,
-                offset=tetris_offset,
+                shape=spawn.shape,
+                above_palm=spawn.flex is None,
+                flex_name=spawn.flex,
+                scale=spawn.scale,
+                offset=spawn.offset,
                 euler=(0.0, 0.0, np.pi / 4),
             )
             self._tetris_body_name = piece.name
 
         self.model = spec.compile()
-        self.model.opt.iterations = int(solver_iterations)
+        self.model.opt.iterations = self._solver_iterations
         self.model.opt.tolerance = 0.0
         self.data = mj.MjData(self.model)
 
@@ -108,11 +162,10 @@ class LeapFlexEnv(gym.Env):
         self._th_axl_act_id = mj.mj_name2id(
             self.model, mj.mjtObj.mjOBJ_ACTUATOR, "th_axl_act"
         )
-        self._th_axl_initial = float(th_axl_initial)
 
         self._flex_names = list_flex_names(self.model)
         self._force_est = AllFlexForceEstimator(
-            self.model, window=force_window, use_qvel=True
+            self.model, window=self._force_window, use_qvel=True
         )
 
         self.action_space = spaces.Box(
@@ -121,6 +174,7 @@ class LeapFlexEnv(gym.Env):
             dtype=np.float32,
         )
         self.observation_space = self._build_observation_space()
+        self._current_spawn = spawn
 
     def _resolve_actuator_ids(self) -> np.ndarray:
         ids = np.empty(len(LEAP_JOINT_ORDER), dtype=np.int32)
@@ -222,6 +276,11 @@ class LeapFlexEnv(gym.Env):
         options: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         super().reset(seed=seed)
+        if self._randomize_on_reset:
+            spawn = self._resolve_spawn(self.np_random)
+            if spawn != self._current_spawn:
+                self._compile_scene(spawn)
+
         mj.mj_resetData(self.model, self.data)
         self.data.ctrl[:] = 0.0
         if self._th_axl_act_id >= 0:
@@ -232,8 +291,9 @@ class LeapFlexEnv(gym.Env):
             self._set_ctrl(options["ctrl"])
         mj.mj_forward(self.model, self.data)
         self._force_est.reset()
+        self._prev_joint_angles = read_leap_joint_angles(self.model, self.data)
         obs = self._get_obs()
-        return obs, {}
+        return obs, {"tetris_spawn": self.tetris_spawn}
 
     def step(
         self, action: np.ndarray
@@ -242,7 +302,17 @@ class LeapFlexEnv(gym.Env):
         for _ in range(self._n_substeps):
             mj.mj_step(self.model, self.data)
         obs = self._get_obs()
-        return obs, 0.0, False, False, {}
+        done = self._terminate()
+        self._prev_joint_angles = read_leap_joint_angles(self.model, self.data)
+        return obs, 0.0, done, False, {}
 
     def close(self) -> None:
         return None
+
+    def _terminate(self) -> bool:
+        if self._joint_movement_threshold is None:
+            return False
+        assert self._prev_joint_angles is not None
+        joint_angles = read_leap_joint_angles(self.model, self.data)
+        movement = float(np.linalg.norm(joint_angles - self._prev_joint_angles))
+        return movement < self._joint_movement_threshold
