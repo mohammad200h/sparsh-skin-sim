@@ -1,5 +1,5 @@
 collection:
-  episodes: 10
+  episodes: 1000
   duration: 5.0
   output_dir: data/finger_close
   seed: 0
@@ -19,7 +19,7 @@ env:
     offset: [0.0, 0.0, 0.0]
     flex: [null, null, null, null]
   render: true
-  num_envs: 4
+  num_envs: 1
 
 policy:
   grasp_pattern: finger_close

@@ -31,6 +31,18 @@ SCENE_XML = (
     / "scene_mjx_cube_CoACD_mjx_flex_sensor.xml"
 )
 
+
+def make_leap_flex_env(**spec: Any) -> LeapFlexEnv:
+    """Picklable factory for ``AsyncVectorEnv`` workers."""
+    try:
+        import torch
+
+        torch.set_num_threads(1)
+    except ImportError:
+        pass
+    return LeapFlexEnv(**spec)
+
+
 SOLVER_ITERATIONS = 50
 TH_AXL_ACT_INITIAL = 1.6
 

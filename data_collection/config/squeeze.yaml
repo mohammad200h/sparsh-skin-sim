@@ -1,5 +1,5 @@
 collection:
-  episodes: 10
+  episodes: 1000
   duration: 10.0
   output_dir: data/squeeze
   seed: 0
@@ -13,6 +13,7 @@ env:
   tetris_flex: null
   joint_movement_threshold: 1.0e-3
   render: true
+  num_envs: 4
 
 policy:
   grasp_pattern: squeeze

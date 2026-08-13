@@ -15,18 +15,19 @@ import time
 import warnings
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass, field, fields
+from functools import partial
 from typing import Any
 
 import gymnasium as gym
 import mujoco.viewer
 import numpy as np
 import yaml
-from gymnasium.vector import SyncVectorEnv
+from gymnasium.vector import AsyncVectorEnv, VectorEnv
 from tqdm import tqdm
 
 from data_collection.policies import Policy, VectorPolicy
 from env.domain_randomization import DomainRandomizationConfig
-from env.leap_flex_env import LeapFlexEnv
+from env.leap_flex_env import LeapFlexEnv, make_leap_flex_env
 from util.fk_taxel_util import LEAP_JOINT_ORDER, N_TAXELS
 from util.motion_util import GRASP_PATTERNS, GraspProfile
 
@@ -136,28 +137,36 @@ def load_config(path: Path | str) -> dict[str, Any]:
     }
 
 
-def build_collection_env(cfg: dict[str, Any]) -> tuple[LeapFlexEnv | SyncVectorEnv, int]:
+def build_collection_env(cfg: dict[str, Any]) -> tuple[LeapFlexEnv | VectorEnv, int]:
     num_envs = cfg["num_envs"]
     env_specs: list[dict[str, Any]] = cfg["env_specs"]
 
     if num_envs == 1:
         return LeapFlexEnv(**env_specs[0]), 1
 
-    factories = [lambda spec=spec: LeapFlexEnv(**spec) for spec in env_specs]
-    vec = SyncVectorEnv(
-        factories,
+    vec = AsyncVectorEnv(
+        [partial(make_leap_flex_env, **spec) for spec in env_specs],
         autoreset_mode=gym.vector.AutoresetMode.NEXT_STEP,
+        context="spawn",
     )
     return vec, num_envs
 
 
-def _reference_env(env: LeapFlexEnv | SyncVectorEnv) -> LeapFlexEnv:
-    if isinstance(env, SyncVectorEnv):
-        sub_env = env.envs[0]
-        if not isinstance(sub_env, LeapFlexEnv):
-            raise TypeError("Expected LeapFlexEnv sub-environments")
-        return sub_env
-    return env
+def _slot_spawn_from_info(info: dict[str, Any], env_id: int) -> dict[str, Any] | None:
+    mask = info.get("_tetris_spawn")
+    if mask is None or not bool(mask[env_id]):
+        return None
+    spawn = info["tetris_spawn"]
+    offset = spawn["offset"][env_id]
+    flex = spawn["flex"][env_id]
+    if isinstance(flex, np.generic):
+        flex = flex.item()
+    return {
+        "shape": str(spawn["shape"][env_id]),
+        "scale": float(spawn["scale"][env_id]),
+        "offset": [float(v) for v in offset],
+        "flex": None if flex is None else str(flex),
+    }
 
 
 def _slice_obs(obs: dict[str, Any], index: int) -> dict[str, Any]:
@@ -170,18 +179,6 @@ def _slice_obs(obs: dict[str, Any], index: int) -> dict[str, Any]:
             key: values[index] for key, values in obs["flex_taxel_fk"].items()
         },
     }
-
-
-def _set_obs_slice(
-    obs: dict[str, Any], index: int, obs_i: dict[str, Any]
-) -> dict[str, Any]:
-    for name, values in obs_i["flex_dist"].items():
-        obs["flex_dist"][name][index] = values
-    for name, values in obs_i["flex_force"].items():
-        obs["flex_force"][name][index] = values
-    for key, values in obs_i["flex_taxel_fk"].items():
-        obs["flex_taxel_fk"][key][index] = values
-    return obs
 
 
 def _stack_flex_dict(steps: list[dict[str, np.ndarray]]) -> dict[str, np.ndarray]:
@@ -261,12 +258,11 @@ class _EpisodeBuffer:
 
 
 def _build_policy(
-    env: LeapFlexEnv | SyncVectorEnv,
+    ref_env: LeapFlexEnv,
     num_envs: int,
     grasp_pattern: str,
     profile_overrides: dict[str, Any],
 ) -> Policy | VectorPolicy:
-    ref_env = _reference_env(env)
     params = {
         "model": ref_env.model,
         "timestep": _env_step_seconds(ref_env),
@@ -359,7 +355,7 @@ def _collect_single_env(
 
 def _collect_vector_env(
     policy: VectorPolicy,
-    env: SyncVectorEnv,
+    env: VectorEnv,
     num_envs: int,
     num_episodes: int,
     *,
@@ -374,19 +370,27 @@ def _collect_vector_env(
     step_seconds = metadata_base["step_seconds"]
     buffers = [_EpisodeBuffer() for _ in range(num_envs)]
     episodes_collected = 0
-    slot_tetris_spawns = [env.envs[i].tetris_spawn for i in range(num_envs)]
 
-    obs, _ = env.reset(seed=seed)
+    obs, info = env.reset(seed=seed)
+    slot_tetris_spawns: list[dict[str, Any] | None] = [
+        _slot_spawn_from_info(info, env_id) for env_id in range(num_envs)
+    ]
     policy.reset()
 
     pbar = tqdm(total=num_episodes, desc="Collecting episodes")
     while episodes_collected < num_episodes:
         actions = policy.act(obs)
-        obs, _, terminated, truncated, _ = env.step(actions)
+        obs, _, terminated, truncated, info = env.step(actions)
+        reset_mask = np.zeros(num_envs, dtype=np.bool_)
+        reset_seeds: list[int | None] = [None] * num_envs
 
         for env_id in range(num_envs):
             if episodes_collected >= num_episodes:
                 break
+
+            spawn = _slot_spawn_from_info(info, env_id)
+            if spawn is not None:
+                slot_tetris_spawns[env_id] = spawn
 
             buffers[env_id].append(actions[env_id], _slice_obs(obs, env_id))
             done = bool(terminated[env_id] or truncated[env_id])
@@ -421,12 +425,19 @@ def _collect_vector_env(
             pbar.update(1)
 
             if at_max_steps and not done:
-                reset_seed = None if episode_seed is None else episode_seed + num_envs
-                obs_i, reset_info = env.envs[env_id].reset(seed=reset_seed)
-                slot_tetris_spawns[env_id] = reset_info.get(
-                    "tetris_spawn", env.envs[env_id].tetris_spawn
+                reset_mask[env_id] = True
+                reset_seeds[env_id] = (
+                    None if episode_seed is None else episode_seed + num_envs
                 )
-                obs = _set_obs_slice(obs, env_id, obs_i)
+
+        if np.any(reset_mask):
+            obs, reset_info = env.reset(
+                seed=reset_seeds, options={"reset_mask": reset_mask}
+            )
+            for env_id in np.flatnonzero(reset_mask):
+                spawn = _slot_spawn_from_info(reset_info, int(env_id))
+                if spawn is not None:
+                    slot_tetris_spawns[int(env_id)] = spawn
 
     pbar.close()
     return output_dir
@@ -434,7 +445,7 @@ def _collect_vector_env(
 
 def collect_squeeze_data(
     policy: Policy | VectorPolicy,
-    env: LeapFlexEnv | SyncVectorEnv,
+    env: LeapFlexEnv | VectorEnv,
     num_envs: int,
     num_episodes: int,
     *,
@@ -444,14 +455,20 @@ def collect_squeeze_data(
     duration: float = 10.0,
     config_path: Path | None = None,
     render: bool = False,
+    ref_env: LeapFlexEnv | None = None,
 ) -> Path:
     """Run ``num_episodes`` and write one compressed ``.npz`` per episode."""
     if num_episodes < 1:
         raise ValueError("num_episodes must be at least 1")
 
     output_dir = Path(output_dir)
-    ref_env = _reference_env(env)
-    step_seconds = _env_step_seconds(ref_env)
+    if isinstance(env, LeapFlexEnv):
+        metadata_env = env
+    elif ref_env is not None:
+        metadata_env = ref_env
+    else:
+        raise TypeError("ref_env is required when collecting from a vector env")
+    step_seconds = _env_step_seconds(metadata_env)
     if max_steps_per_episode is None:
         max_steps_per_episode = max(1, int(np.ceil(duration / step_seconds)))
 
@@ -463,7 +480,7 @@ def collect_squeeze_data(
         "max_steps_per_episode": max_steps_per_episode,
         "max_duration_seconds": duration,
         "num_envs": num_envs,
-        "domain_randomization_enabled": ref_env._domain_randomization is not None,
+        "domain_randomization_enabled": metadata_env._domain_randomization is not None,
         "n_taxels": N_TAXELS,
         "joint_names": LEAP_JOINT_ORDER,
     }
@@ -488,8 +505,8 @@ def collect_squeeze_data(
 
     if not isinstance(policy, VectorPolicy):
         raise TypeError("Expected VectorPolicy for num_envs > 1")
-    if not isinstance(env, SyncVectorEnv):
-        raise TypeError("Expected SyncVectorEnv for num_envs > 1")
+    if not isinstance(env, VectorEnv):
+        raise TypeError("Expected VectorEnv for num_envs > 1")
     if render:
         warnings.warn(
             "render is disabled when env.num_envs > 1",
@@ -527,30 +544,36 @@ def main() -> None:
     cfg = load_config(args.config)
 
     env, num_envs = build_collection_env(cfg)
-    policy = _build_policy(
-        env,
-        num_envs,
-        cfg["grasp_pattern"],
-        cfg["profile_overrides"],
-    )
+    ref_env = env if isinstance(env, LeapFlexEnv) else LeapFlexEnv(**cfg["env_specs"][0])
+    try:
+        policy = _build_policy(
+            ref_env,
+            num_envs,
+            cfg["grasp_pattern"],
+            cfg["profile_overrides"],
+        )
 
-    output_dir = collect_squeeze_data(
-        policy,
-        env,
-        num_envs,
-        cfg["episodes"],
-        output_dir=cfg["output_dir"],
-        seed=cfg["seed"],
-        duration=cfg["duration"],
-        config_path=cfg["config_path"],
-        render=cfg["render"],
-    )
-    print(
-        f"Saved episodes to {output_dir.resolve()} "
-        f"(pattern={cfg['grasp_pattern']}, num_envs={num_envs}, "
-        f"max_duration={cfg['duration']}s, config={cfg['config_path']})"
-    )
-    env.close()
+        output_dir = collect_squeeze_data(
+            policy,
+            env,
+            num_envs,
+            cfg["episodes"],
+            output_dir=cfg["output_dir"],
+            seed=cfg["seed"],
+            duration=cfg["duration"],
+            config_path=cfg["config_path"],
+            render=cfg["render"],
+            ref_env=ref_env,
+        )
+        print(
+            f"Saved episodes to {output_dir.resolve()} "
+            f"(pattern={cfg['grasp_pattern']}, num_envs={num_envs}, "
+            f"max_duration={cfg['duration']}s, config={cfg['config_path']})"
+        )
+    finally:
+        env.close()
+        if ref_env is not env:
+            ref_env.close()
 
 
 if __name__ == "__main__":
