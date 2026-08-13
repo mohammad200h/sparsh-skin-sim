@@ -1,0 +1,2 @@
+# Ignore data directories anywhere in the repo
+**/data/

@@ -9,6 +9,7 @@ import gymnasium as gym
 import mujoco as mj
 import numpy as np
 from gymnasium import spaces
+from util.motion_util import GRASP_PATTERNS
 
 from env.domain_randomization import DomainRandomizationConfig, TetrisSpawn
 from util.fk_taxel_util import (
@@ -25,6 +26,8 @@ from util.flex_util import (
 )
 from util.objects_util import add_tetris_part
 
+from env.rewad import Reward
+
 SCENE_XML = (
     Path(__file__).resolve().parent.parent
     / "leapXELA_model"
@@ -33,6 +36,18 @@ SCENE_XML = (
 
 SOLVER_ITERATIONS = 50
 TH_AXL_ACT_INITIAL = 1.6
+FINGERTIP_FLEX_NAMES: dict[str, str] = {
+    "if": "flex_if_tip",
+    "mf": "flex_mf_tip",
+    "rf": "flex_rf_tip",
+    "th": "flex_th_tip",
+}
+FINGERTIP_BODY_NAMES: dict[str, str] = {
+    "if": "if_ds",
+    "mf": "mf_ds",
+    "rf": "rf_ds",
+    "th": "th_ds",
+}
 
 
 class LeapFlexEnv(gym.Env):
@@ -80,6 +95,7 @@ class LeapFlexEnv(gym.Env):
         joint_movement_threshold: float | None = None,
         domain_randomization: DomainRandomizationConfig | None = None,
         env_slot: int | None = None,
+        motion_type: str = "squeeze",
     ) -> None:
         super().__init__()
         self._scene_xml = Path(scene_xml) if scene_xml is not None else SCENE_XML
@@ -107,6 +123,8 @@ class LeapFlexEnv(gym.Env):
             and self._domain_randomization is not None
             and self._env_slot is None
         )
+
+        self._get_reward_func = Reward(motion_type= motion_type).get_reward_func()
 
         if joint_movement_threshold is not None and joint_movement_threshold < 0:
             raise ValueError("joint_movement_threshold must be >= 0")
@@ -167,6 +185,7 @@ class LeapFlexEnv(gym.Env):
         self._force_est = AllFlexForceEstimator(
             self.model, window=self._force_window, use_qvel=True
         )
+        self._cache_contact_ids()
 
         self.action_space = spaces.Box(
             low=self._ctrl_lo.astype(np.float32),
@@ -269,6 +288,71 @@ class LeapFlexEnv(gym.Env):
             "flex_taxel_fk": flex_taxel_fk,
         }
 
+    def _geom_ids_for_body(self, body_name: str) -> list[int]:
+        body_id = mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_BODY, body_name)
+        if body_id < 0:
+            return []
+        adr = int(self.model.body_geomadr[body_id])
+        n = int(self.model.body_geomnum[body_id])
+        return list(range(adr, adr + n))
+
+    def _cache_contact_ids(self) -> None:
+        self._fingertip_keys = tuple(FINGERTIP_FLEX_NAMES)
+        finger_index = {name: i for i, name in enumerate(self._fingertip_keys)}
+        self._flex_finger = np.full(self.model.nflex, -1, dtype=np.int8)
+        self._geom_finger = np.full(self.model.ngeom, -1, dtype=np.int8)
+
+        for finger, flex_name in FINGERTIP_FLEX_NAMES.items():
+            flex_id = mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_FLEX, flex_name)
+            if flex_id >= 0:
+                self._flex_finger[flex_id] = finger_index[finger]
+
+        for finger, body_name in FINGERTIP_BODY_NAMES.items():
+            for geom_id in self._geom_ids_for_body(body_name):
+                name = mj.mj_id2name(self.model, mj.mjtObj.mjOBJ_GEOM, geom_id)
+                if name is not None and "tip" in name:
+                    self._geom_finger[geom_id] = finger_index[finger]
+
+        object_ids = (
+            self._geom_ids_for_body(self._tetris_body_name)
+            if self._tetris_body_name is not None
+            else []
+        )
+        self._object_geom_ids = np.asarray(object_ids, dtype=np.int32)
+
+    def _get_contact_between_fingers_and_object(self) -> dict[str, bool]:
+        values = np.zeros(len(self._fingertip_keys), dtype=bool)
+        ncon = int(self.data.ncon)
+        if ncon == 0 or self._object_geom_ids.size == 0:
+            return dict(zip(self._fingertip_keys, values.tolist())), values
+
+        geoms = self.data.contact.geom
+        flexes = self.data.contact.flex
+        finger = np.where(
+            flexes >= 0,
+            self._flex_finger[np.clip(flexes, 0, self._flex_finger.size - 1)],
+            np.where(
+                geoms >= 0,
+                self._geom_finger[np.clip(geoms, 0, self._geom_finger.size - 1)],
+                -1,
+            ),
+        )
+        hit = finger[(finger >= 0) & np.isin(geoms[:, ::-1], self._object_geom_ids)]
+        if hit.size:
+            values[hit] = True
+        contacts = dict(zip(self._fingertip_keys, values.tolist()))
+        return contacts, values
+
+    def _terminate(self) -> bool:
+        if self._joint_movement_threshold is None:
+            return False
+        assert self._prev_joint_angles is not None
+        joint_angles = read_leap_joint_angles(self.model, self.data)
+        movement = float(np.linalg.norm(joint_angles - self._prev_joint_angles))
+        return movement < self._joint_movement_threshold
+
+
+
     def reset(
         self,
         *,
@@ -301,18 +385,14 @@ class LeapFlexEnv(gym.Env):
         self._set_ctrl(action)
         for _ in range(self._n_substeps):
             mj.mj_step(self.model, self.data)
+        contact_func = self._get_contact_between_fingers_and_object
+        reward = self._get_reward_func(contact_func)
+        print(f"reward::{reward}")
         obs = self._get_obs()
         done = self._terminate()
         self._prev_joint_angles = read_leap_joint_angles(self.model, self.data)
-        return obs, 0.0, done, False, {}
+        return obs, reward, done, False, {}
 
     def close(self) -> None:
         return None
 
-    def _terminate(self) -> bool:
-        if self._joint_movement_threshold is None:
-            return False
-        assert self._prev_joint_angles is not None
-        joint_angles = read_leap_joint_angles(self.model, self.data)
-        movement = float(np.linalg.norm(joint_angles - self._prev_joint_angles))
-        return movement < self._joint_movement_threshold
