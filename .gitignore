@@ -1,2 +1,2 @@
-# Collected episode data
-data/
+# Ignore data directories anywhere in the repo
+**/data/
