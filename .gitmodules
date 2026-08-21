@@ -1,3 +1,6 @@
 [submodule "leapXELA_model"]
 	path = leapXELA_model
 	url = https://github.com/mohammad200h/leapXELA_model.git
+[submodule "cyringe"]
+	path = cyringe
+	url = https://github.com/mohammad200h/cyringe.git
