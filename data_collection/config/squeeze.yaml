@@ -13,7 +13,7 @@ env:
   tetris_flex: null
   joint_movement_threshold: 1.0e-3
   render: true
-  num_envs: 4
+  num_envs: 1
 
 policy:
   grasp_pattern: squeeze

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Callable, Sequence
 
 import mujoco as mj
@@ -9,6 +10,18 @@ import numpy as np
 
 from .flex_util import flex_id, flex_vertex_body_ids
 from .fk_taxel_util import flex_vertex_for_fk_grid
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_CYRINGE_XML = _REPO_ROOT / "cyringe" / "cyringe.xml"
+DEFAULT_CYRINGE_PREFIX = "cyringe/"
+DEFAULT_CYRINGE_SCALE = 1.0
+DEFAULT_CYRINGE_MASS = 0.05  # kg per body (housing / shaft)
+DEFAULT_CYRINGE_CLEARANCE = 0.02
+# Sliding / torsional / rolling; housing is bumped up for a grippier barrel.
+DEFAULT_CYRINGE_FRICTION = (0.8, 0.005, 0.0001)
+DEFAULT_CYRINGE_HOUSING_FRICTION = (2.5, 0.01, 2.5)
+# Unscaled mesh AABB half-height (~0.21 m tall); used for spawn clearance.
+_CYRINGE_HALF_HEIGHT = 0.106
 
 # Match the former reorientation-cube defaults.
 DEFAULT_CUBE_NAME = "cube"
@@ -934,3 +947,110 @@ def add_tetris_parts(
         )
         bodies.append(body)
     return bodies
+
+
+def add_cyringe(
+    spec: mj.MjSpec,
+    *,
+    xml_path: Path | str | None = None,
+    prefix: str = DEFAULT_CYRINGE_PREFIX,
+    pos: Sequence[float] | None = None,
+    quat: Sequence[float] | None = None,
+    euler: Sequence[float] | None = None,
+    scale: float = DEFAULT_CYRINGE_SCALE,
+    mass: float = DEFAULT_CYRINGE_MASS,
+    contype: int = DEFAULT_CUBE_CONTYPE,
+    conaffinity: int = DEFAULT_CUBE_CONAFFINITY,
+    housing_friction: Sequence[float] = DEFAULT_CYRINGE_HOUSING_FRICTION,
+    friction: Sequence[float] = DEFAULT_CYRINGE_FRICTION,
+    above_palm: bool = True,
+    flex_name: str | None = None,
+    offset: Sequence[float] = (0.0, 0.0, 0.0),
+    clearance: float = DEFAULT_CYRINGE_CLEARANCE,
+    keep_actuator: bool = False,
+) -> tuple[mj.MjsBody, np.ndarray]:
+    """Attach the free-floating cyringe model into ``spec.worldbody``.
+
+    Loads ``cyringe/cyringe.xml``, scales meshes, sets collision masks to match
+    the hand flex skins, and places the housing free body above the palm (or a
+    chosen flex). The position actuator is removed by default so the plunger
+    slide is passive under contact.
+
+    Returns
+    -------
+    housing, spawn_pos:
+        Attached housing body and the world-frame spawn centre used for the
+        attach frame.
+    """
+    if float(scale) <= 0.0:
+        raise ValueError(f"scale must be > 0, got {scale}")
+    if float(mass) <= 0.0:
+        raise ValueError(f"mass must be > 0, got {mass}")
+
+    path = Path(xml_path) if xml_path is not None else DEFAULT_CYRINGE_XML
+    if not path.is_file():
+        raise FileNotFoundError(f"Cyringe XML not found: {path}")
+
+    half_height = _CYRINGE_HALF_HEIGHT * float(scale)
+    spawn = _resolve_spawn_pos(
+        spec,
+        pos=pos,
+        flex_name=flex_name,
+        above_palm=above_palm,
+        half_size=(half_height, half_height, half_height),
+        clearance=clearance,
+        offset=offset,
+    )
+    orientation = _resolve_tetris_quat(quat, euler)
+
+    child = mj.MjSpec.from_file(path.as_posix())
+    if not keep_actuator:
+        for actuator in list(child.actuators):
+            child.delete(actuator)
+
+    mesh_scale = np.full(3, float(scale), dtype=np.float64)
+    for mesh in child.meshes:
+        mesh.scale = mesh_scale.tolist()
+
+    body_mass = float(mass) * (float(scale) ** 3)
+    # Rough solid-cylinder inertia for numerical stability (L≈0.21 m, r≈0.02 m).
+    # XML uses fullinertia; keep that form (cannot mix with diagonal inertia).
+    length = 2.0 * half_height
+    radius = 0.02 * float(scale)
+    i_zz = 0.5 * body_mass * radius * radius
+    i_xx = (1.0 / 12.0) * body_mass * (3.0 * radius * radius + length * length)
+    fullinertia = [i_xx, i_xx, i_zz, 0.0, 0.0, 0.0]
+    for body in child.bodies:
+        if not body.name:
+            continue
+        body.mass = body_mass
+        body.fullinertia = fullinertia
+
+    for geom in child.geoms:
+        if int(geom.contype) or int(geom.conaffinity):
+            geom.contype = int(contype)
+            geom.conaffinity = int(conaffinity)
+            geom.group = 0
+            geom.condim = 3
+            geom.friction = list(friction)
+
+    housing_body = child.body("housing")
+    if housing_body is not None:
+        housing_mu = list(housing_friction)
+        for geom in housing_body.geoms:
+            if int(geom.contype) or int(geom.conaffinity):
+                geom.friction = housing_mu
+
+    spawn = np.asarray(spawn, dtype=np.float64)
+    frame = spec.worldbody.add_frame(
+        pos=spawn.tolist(),
+        quat=orientation.tolist(),
+    )
+    spec.attach(child, prefix=prefix, frame=frame)
+
+    housing = spec.body(f"{prefix}housing")
+    if housing is None:
+        raise RuntimeError(
+            f"Failed to attach cyringe: body '{prefix}housing' not found"
+        )
+    return housing, spawn
