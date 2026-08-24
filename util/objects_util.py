@@ -18,8 +18,8 @@ DEFAULT_CYRINGE_SCALE = 1.0
 DEFAULT_CYRINGE_MASS = 0.05  # kg per body (housing / shaft)
 DEFAULT_CYRINGE_CLEARANCE = 0.02
 # Sliding / torsional / rolling; housing is bumped up for a grippier barrel.
-DEFAULT_CYRINGE_FRICTION = (0.8, 0.005, 0.0001)
-DEFAULT_CYRINGE_HOUSING_FRICTION = (2.5, 0.01, 2.5)
+DEFAULT_CYRINGE_FRICTION = (0.1, 0.005, 0.0001)
+DEFAULT_CYRINGE_HOUSING_FRICTION = (0.0, 0.0, 2.5)
 # Unscaled mesh AABB half-height (~0.21 m tall); used for spawn clearance.
 _CYRINGE_HALF_HEIGHT = 0.106
 
@@ -968,13 +968,15 @@ def add_cyringe(
     offset: Sequence[float] = (0.0, 0.0, 0.0),
     clearance: float = DEFAULT_CYRINGE_CLEARANCE,
     keep_actuator: bool = False,
+    sticky: bool = False,
 ) -> tuple[mj.MjsBody, np.ndarray]:
     """Attach the free-floating cyringe model into ``spec.worldbody``.
 
     Loads ``cyringe/cyringe.xml``, scales meshes, sets collision masks to match
     the hand flex skins, and places the housing free body above the palm (or a
     chosen flex). The position actuator is removed by default so the plunger
-    slide is passive under contact.
+    slide is passive under contact. With ``sticky=True``, the housing freejoint
+    is removed so the barrel stays fixed in world while the shaft can still slide.
 
     Returns
     -------
@@ -1007,10 +1009,33 @@ def add_cyringe(
     if not keep_actuator:
         for actuator in list(child.actuators):
             child.delete(actuator)
+    if sticky:
+        housing_body = child.body("housing")
+        if housing_body is not None:
+            for joint in list(housing_body.joints):
+                if int(joint.type) == int(mj.mjtJoint.mjJNT_FREE):
+                    child.delete(joint)
 
-    mesh_scale = np.full(3, float(scale), dtype=np.float64)
+    s = float(scale)
+    mesh_scale = np.full(3, s, dtype=np.float64)
     for mesh in child.meshes:
         mesh.scale = mesh_scale.tolist()
+
+    # Mesh scale alone is not enough: geom/body offsets and the slide joint
+    # range are authored in metres and must scale with the meshes.
+    if s != 1.0:
+        for body in child.bodies:
+            if not body.name:
+                continue
+            body.pos = (np.asarray(body.pos, dtype=np.float64) * s).tolist()
+            body.ipos = (np.asarray(body.ipos, dtype=np.float64) * s).tolist()
+            for joint in body.joints:
+                if int(joint.type) == int(mj.mjtJoint.mjJNT_SLIDE):
+                    joint.range = (
+                        np.asarray(joint.range, dtype=np.float64) * s
+                    ).tolist()
+        for geom in child.geoms:
+            geom.pos = (np.asarray(geom.pos, dtype=np.float64) * s).tolist()
 
     body_mass = float(mass) * (float(scale) ** 3)
     # Rough solid-cylinder inertia for numerical stability (L≈0.21 m, r≈0.02 m).

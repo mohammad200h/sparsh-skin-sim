@@ -1,0 +1,11 @@
+  cyringe spawn pos=(np.float64(0.0952), np.float64(0.0498), np.float64(0.0283)) name=cyringe/housing scale=1.0 pitch=90deg on=palm offset=(0.01, 0.05, -0.12) sticky=True ee_site=flex_th_tip_ee goal_mocap=ik_goal ik=dls
+Loaded: scene_mjx_cube_CoACD_mjx_flex_sensor.xml
+  nq=1121  nv=1121  nu=16  nbody=389
+  flexes (18): flex_uspa46_1, flex_uspa46_2, flex_uspa46_3, flex_rf_bs_uspa44, flex_rf_px_uspa44, flex_rf_md_uspa44, flex_mf_bs_uspa44, flex_mf_px_uspa44, flex_mf_md_uspa44, flex_if_bs_uspa44, flex_if_px_uspa44, flex_if_md_uspa44, flex_th_px_uspa44, flex_th_ds_uspa44, flex_if_tip, flex_mf_tip, flex_rf_tip, flex_th_tip
+  visualize_force=False  headless=True
+  Tip: housing is fixed in world; shaft still slides under contact.
+  motion: phase1 MF/RF close (mcp=0.91, pip=1.89, dip=0.592, 1.0s), then thumb IK [dls] → cyringe/handle + z*0.02 (tol=0.008 m)
+  motion phase → finger_close
+  motion phase → thumb_ik
+  wrote IK log: reports/ik_compare/dls.csv
+  wrote IK report: reports/ik_compare/dls.md
