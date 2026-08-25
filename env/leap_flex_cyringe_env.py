@@ -1,7 +1,10 @@
-"""Leap+XELA Gymnasium env: joint actions → flex / FK taxel observations."""
+"""Leap+XELA Gymnasium env with a cyringe spawned like ``demos/demo_cyringe.py``."""
 
 from __future__ import annotations
 
+import json
+import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -9,9 +12,8 @@ import gymnasium as gym
 import mujoco as mj
 import numpy as np
 from gymnasium import spaces
-from util.motion_util import GRASP_PATTERNS
 
-from env.domain_randomization import DomainRandomizationConfig, TetrisSpawn
+from env.rewad import SqueezeCyringeReward
 from util.fk_taxel_util import (
     LEAP_JOINT_ORDER,
     N_TAXELS,
@@ -21,60 +23,112 @@ from util.fk_taxel_util import (
 )
 from util.flex_util import (
     AllFlexForceEstimator,
+    add_flex_center_ee_site,
     flex_joint_displacements,
     list_flex_names,
 )
-from util.objects_util import add_tetris_part
-
-from env.rewad import Reward
+from util.ik_common import (
+    DEFAULT_IK_GOAL_MOCAP,
+    DEFAULT_THUMB_EE_SITE,
+    DEFAULT_THUMB_FLEX,
+    add_ik_goal_mocap,
+)
+from util.objects_util import add_cyringe
+from util.trajectory_generation import add_trajectory_mocaps
 
 SCENE_XML = (
     Path(__file__).resolve().parent.parent
     / "leapXELA_model"
     / "scene_mjx_cube_CoACD_mjx_flex_sensor.xml"
 )
-
-SOLVER_ITERATIONS = 50
-TH_AXL_ACT_INITIAL = 1.6
-FINGERTIP_FLEX_NAMES: dict[str, str] = {
-    "if": "flex_if_tip",
-    "mf": "flex_mf_tip",
-    "rf": "flex_rf_tip",
-    "th": "flex_th_tip",
-}
-FINGERTIP_BODY_NAMES: dict[str, str] = {
-    "if": "if_ds",
-    "mf": "mf_ds",
-    "rf": "rf_ds",
-    "th": "th_ds",
-}
+ENV_CONFIG_JSON = Path(__file__).resolve().parent / "env_config.json"
 
 
-class LeapFlexEnv(gym.Env):
-    """Minimal MuJoCo env driven by Leap joint targets.
+def load_env_config(path: Path | str | None = None) -> dict[str, Any]:
+    config_path = Path(path) if path is not None else ENV_CONFIG_JSON
+    with config_path.open() as f:
+        return json.load(f)
+
+
+def _xyz(value: Any, key: str) -> tuple[float, float, float]:
+    if not isinstance(value, (list, tuple)) or len(value) != 3:
+        raise ValueError(f"{key} must be an [x, y, z] triplet")
+    return (float(value[0]), float(value[1]), float(value[2]))
+
+
+@dataclass(frozen=True)
+class CyringeSpawn:
+    """Resolved cyringe spawn parameters matching ``demo_cyringe.py``."""
+
+    flex: str | None
+    scale: float
+    offset: tuple[float, float, float]
+    euler: tuple[float, float, float]
+    sticky: bool
+    friction: tuple[float, float, float]
+    housing_friction: tuple[float, float, float]
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "flex": self.flex,
+            "scale": self.scale,
+            "offset": list(self.offset),
+            "euler": list(self.euler),
+            "sticky": self.sticky,
+            "friction": list(self.friction),
+            "housing_friction": list(self.housing_friction),
+        }
+
+    @classmethod
+    def from_config(cls, raw: dict[str, Any]) -> CyringeSpawn:
+        flex_raw = raw.get("flex")
+        flex = None if flex_raw is None else str(flex_raw)
+        offset = _xyz(raw.get("offset", [0.0, 0.0, 0.0]), "cyringe.offset")
+        spawn_offset = (
+            offset[0] + float(raw.get("delta_x", 0.0)),
+            offset[1] + float(raw.get("delta_y", 0.0)),
+            offset[2] + float(raw.get("delta_z", 0.0)),
+        )
+        euler = _xyz(
+            raw.get("euler", [0.0, float(np.pi / 2), float(-np.pi / 2)]),
+            "cyringe.euler",
+        )
+        spawn_euler = (
+            euler[0],
+            euler[1],
+            euler[2] + float(raw.get("delta_rot_z", 0.0)),
+        )
+        return cls(
+            flex=flex,
+            scale=float(raw.get("scale", 1.0)),
+            offset=spawn_offset,
+            euler=spawn_euler,
+            sticky=bool(raw.get("sticky", False)),
+            friction=_xyz(
+                raw.get("friction", [0.1, 0.005, 0.0001]),
+                "cyringe.friction",
+            ),
+            housing_friction=_xyz(
+                raw.get("housing_friction", [0.0, 0.0, 2.5]),
+                "cyringe.housing_friction",
+            ),
+        )
+
+
+class LeapFlexCyringeEnv(gym.Env):
+    """Minimal MuJoCo env driven by Leap joint targets, with a spawned cyringe.
 
     ``action``
         Shape ``(16,)`` joint position targets in ``LEAP_JOINT_ORDER``
         (same order as the 16 position actuators). Written to ``data.ctrl``.
 
     ``observation``
-        Dict with:
+        Dict with ``flex_dist``, ``flex_force``, and ``flex_taxel_fk``.
 
-        - ``flex_dist``: ``{flex_name: (n_vert, 3)}`` vertex displacements
-        - ``flex_force``: ``{flex_name: (n_vert, 3)}`` Kelvin–Voigt forces
-        - ``flex_taxel_fk``: FK taxel pack
-          ``positions``, ``rotations``, ``forces_local``, ``forces_world``,
-          ``positions_deformed`` (all keyed by FK taxel order, 368 taxels)
-
-    Reward is always ``0``. ``truncated`` is always ``False``. When
-    ``joint_movement_threshold`` is set, ``terminated`` becomes ``True`` once
-    the L2 norm of the per-step joint-angle change drops below that value
-    (radians).
-
-    Domain randomization varies tetris spawn parameters. With ``env_slot`` set
-    (vector env), the slot picks deterministically from the DR pools once at
-    startup. Without ``env_slot``, a new spawn is sampled from the pools on
-    every ``reset()``.
+    Cyringe placement matches ``demos/demo_cyringe.py``: above the palm pads
+    (or a named flex), default offset ``(0.01, 0.05, -0.12)``, and a 90°
+    side-lay euler ``(0, π/2, -π/2)`` plus optional yaw. Defaults live in
+    ``env/env_config.json``.
     """
 
     metadata = {"render_modes": []}
@@ -83,87 +137,103 @@ class LeapFlexEnv(gym.Env):
         self,
         scene_xml: Path | str | None = None,
         *,
-        n_substeps: int = 1,
-        solver_iterations: int = SOLVER_ITERATIONS,
-        th_axl_initial: float = TH_AXL_ACT_INITIAL,
-        force_window: int = 5,
-        spawn_tetris: bool = False,
-        tetris_shape: str = "T",
-        tetris_scale: float = 1.5,
-        tetris_offset: tuple[float, float, float] = (0.0, 0.0, 0.0),
-        tetris_flex: str | None = None,
-        joint_movement_threshold: float | None = None,
-        domain_randomization: DomainRandomizationConfig | None = None,
-        env_slot: int | None = None,
-        motion_type: str = "squeeze",
+        config_path: Path | str | None = None,
+        n_substeps: int | None = None,
+        solver_iterations: int | None = None,
+        th_axl_initial: float | None = None,
+        force_window: int | None = None,
+        max_timestep: int | None = None,
+        motion_type: str | None = None,
+        cyringe: dict[str, Any] | None = None,
+        ik_helpers: bool = True,
+        n_traj_waypoints: int | None = None,
     ) -> None:
         super().__init__()
+        cfg = load_env_config(config_path)
+        cyringe_cfg = dict(cfg.get("cyringe", {}))
+        if cyringe is not None:
+            cyringe_cfg.update(cyringe)
+
         self._scene_xml = Path(scene_xml) if scene_xml is not None else SCENE_XML
         if not self._scene_xml.is_file():
             raise FileNotFoundError(f"Scene not found: {self._scene_xml}")
 
-        self._n_substeps = int(n_substeps)
+        self._n_substeps = int(
+            n_substeps if n_substeps is not None else cfg.get("n_substeps", 1)
+        )
         if self._n_substeps < 1:
             raise ValueError("n_substeps must be >= 1")
 
-        self._solver_iterations = int(solver_iterations)
-        self._th_axl_initial = float(th_axl_initial)
-        self._force_window = int(force_window)
-        self._spawn_tetris = bool(spawn_tetris)
-        self._default_spawn = TetrisSpawn(
-            shape=str(tetris_shape),
-            scale=float(tetris_scale),
-            offset=tuple(float(v) for v in tetris_offset),
-            flex=tetris_flex,
+        self._solver_iterations = int(
+            solver_iterations
+            if solver_iterations is not None
+            else cfg.get("solver_iterations", 50)
         )
-        self._domain_randomization = domain_randomization
-        self._env_slot = env_slot
-        self._randomize_on_reset = (
-            self._spawn_tetris
-            and self._domain_randomization is not None
-            and self._env_slot is None
+        self._th_axl_initial = float(
+            th_axl_initial
+            if th_axl_initial is not None
+            else cfg.get("th_axl_initial", 1.6)
         )
+        self._force_window = int(
+            force_window if force_window is not None else cfg.get("force_window", 5)
+        )
+        self._max_timestep = int(
+            max_timestep if max_timestep is not None else cfg.get("max_timestep", 200)
+        )
+        if self._max_timestep < 1:
+            raise ValueError("max_timestep must be >= 1")
+        self._timestep = 0
+        self._reward = SqueezeCyringeReward()
 
-        self._get_reward_func = Reward(motion_type= motion_type).get_reward_func()
-
-        if joint_movement_threshold is not None and joint_movement_threshold < 0:
-            raise ValueError("joint_movement_threshold must be >= 0")
-        self._joint_movement_threshold = joint_movement_threshold
-        self._prev_joint_angles: np.ndarray | None = None
-        self._tetris_body_name: str | None = None
-        self._current_spawn = self._default_spawn
-
-        self._compile_scene(self._resolve_spawn(None))
+        self._cyringe_housing_name: str | None = None
+        self._cyringe_housing_body_id = -1
+        self._cyringe_spawn_z = 0.0
+        self._squeeze_qposadr = -1
+        self._squeeze_qpos_hi = 0.0
+        self._ik_helpers = bool(ik_helpers)
+        self._n_traj_waypoints = (
+            None if n_traj_waypoints is None else int(n_traj_waypoints)
+        )
+        self.ee_site: str | None = None
+        self.goal_mocap: str | None = None
+        self.traj_mocap_names: list[str] | None = None
+        self._current_spawn = CyringeSpawn.from_config(cyringe_cfg)
+        self._compile_scene(self._current_spawn)
 
     @property
-    def tetris_spawn(self) -> dict[str, Any]:
+    def cyringe_spawn(self) -> dict[str, Any]:
         return self._current_spawn.as_dict()
 
-    def _resolve_spawn(self, rng: np.random.Generator | None) -> TetrisSpawn:
-        if not self._spawn_tetris or self._domain_randomization is None:
-            return self._default_spawn
-        if self._env_slot is not None:
-            return self._domain_randomization.for_slot(self._env_slot)
-        if rng is None:
-            return self._domain_randomization.sample(
-                np.random.default_rng()
-            )
-        return self._domain_randomization.sample(rng)
-
-    def _compile_scene(self, spawn: TetrisSpawn) -> None:
+    def _compile_scene(self, spawn: CyringeSpawn) -> None:
         spec = mj.MjSpec.from_file(self._scene_xml.as_posix())
-        self._tetris_body_name = None
-        if self._spawn_tetris:
-            piece = add_tetris_part(
+        housing, spawn_pos = add_cyringe(
+            spec,
+            above_palm=spawn.flex is None,
+            flex_name=spawn.flex,
+            scale=spawn.scale,
+            offset=spawn.offset,
+            euler=spawn.euler,
+            sticky=spawn.sticky,
+            friction=spawn.friction,
+            housing_friction=spawn.housing_friction,
+        )
+        self._cyringe_housing_name = housing.name
+        self._cyringe_spawn_z = float(np.asarray(spawn_pos, dtype=np.float64)[2])
+
+        self.ee_site = None
+        self.goal_mocap = None
+        self.traj_mocap_names = None
+        if self._ik_helpers:
+            self.ee_site = add_flex_center_ee_site(
                 spec,
-                shape=spawn.shape,
-                above_palm=spawn.flex is None,
-                flex_name=spawn.flex,
-                scale=spawn.scale,
-                offset=spawn.offset,
-                euler=(0.0, 0.0, np.pi / 4),
+                DEFAULT_THUMB_FLEX,
+                site_name=DEFAULT_THUMB_EE_SITE,
             )
-            self._tetris_body_name = piece.name
+            self.goal_mocap = add_ik_goal_mocap(spec, name=DEFAULT_IK_GOAL_MOCAP)
+            if self._n_traj_waypoints is not None:
+                self.traj_mocap_names = add_trajectory_mocaps(
+                    spec, n_waypoints=self._n_traj_waypoints
+                )
 
         self.model = spec.compile()
         self.model.opt.iterations = self._solver_iterations
@@ -180,12 +250,13 @@ class LeapFlexEnv(gym.Env):
         self._th_axl_act_id = mj.mj_name2id(
             self.model, mj.mjtObj.mjOBJ_ACTUATOR, "th_axl_act"
         )
+        self._reward.bind(self.model, self._cyringe_housing_name)
+        self._cache_termination_ids()
 
         self._flex_names = list_flex_names(self.model)
         self._force_est = AllFlexForceEstimator(
             self.model, window=self._force_window, use_qvel=True
         )
-        self._cache_contact_ids()
 
         self.action_space = spaces.Box(
             low=self._ctrl_lo.astype(np.float32),
@@ -209,9 +280,11 @@ class LeapFlexEnv(gym.Env):
         flex_dist: dict[str, spaces.Box] = {}
         flex_force: dict[str, spaces.Box] = {}
         for name in self._flex_names:
-            n_vert = int(self.model.flex_vertnum[mj.mj_name2id(
-                self.model, mj.mjtObj.mjOBJ_FLEX, name
-            )])
+            n_vert = int(
+                self.model.flex_vertnum[
+                    mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_FLEX, name)
+                ]
+            )
             shape = (n_vert, 3)
             flex_dist[name] = spaces.Box(
                 low=-np.inf, high=np.inf, shape=shape, dtype=np.float64
@@ -288,70 +361,61 @@ class LeapFlexEnv(gym.Env):
             "flex_taxel_fk": flex_taxel_fk,
         }
 
-    def _geom_ids_for_body(self, body_name: str) -> list[int]:
-        body_id = mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_BODY, body_name)
-        if body_id < 0:
-            return []
-        adr = int(self.model.body_geomadr[body_id])
-        n = int(self.model.body_geomnum[body_id])
-        return list(range(adr, adr + n))
-
-    def _cache_contact_ids(self) -> None:
-        self._fingertip_keys = tuple(FINGERTIP_FLEX_NAMES)
-        finger_index = {name: i for i, name in enumerate(self._fingertip_keys)}
-        self._flex_finger = np.full(self.model.nflex, -1, dtype=np.int8)
-        self._geom_finger = np.full(self.model.ngeom, -1, dtype=np.int8)
-
-        for finger, flex_name in FINGERTIP_FLEX_NAMES.items():
-            flex_id = mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_FLEX, flex_name)
-            if flex_id >= 0:
-                self._flex_finger[flex_id] = finger_index[finger]
-
-        for finger, body_name in FINGERTIP_BODY_NAMES.items():
-            for geom_id in self._geom_ids_for_body(body_name):
-                name = mj.mj_id2name(self.model, mj.mjtObj.mjOBJ_GEOM, geom_id)
-                if name is not None and "tip" in name:
-                    self._geom_finger[geom_id] = finger_index[finger]
-
-        object_ids = (
-            self._geom_ids_for_body(self._tetris_body_name)
-            if self._tetris_body_name is not None
-            else []
+    def _cache_termination_ids(self) -> None:
+        housing = self._cyringe_housing_name or ""
+        self._cyringe_housing_body_id = mj.mj_name2id(
+            self.model, mj.mjtObj.mjOBJ_BODY, housing
         )
-        self._object_geom_ids = np.asarray(object_ids, dtype=np.int32)
-
-    def _get_contact_between_fingers_and_object(self) -> dict[str, bool]:
-        values = np.zeros(len(self._fingertip_keys), dtype=bool)
-        ncon = int(self.data.ncon)
-        if ncon == 0 or self._object_geom_ids.size == 0:
-            return dict(zip(self._fingertip_keys, values.tolist())), values
-
-        geoms = self.data.contact.geom
-        flexes = self.data.contact.flex
-        finger = np.where(
-            flexes >= 0,
-            self._flex_finger[np.clip(flexes, 0, self._flex_finger.size - 1)],
-            np.where(
-                geoms >= 0,
-                self._geom_finger[np.clip(geoms, 0, self._geom_finger.size - 1)],
-                -1,
-            ),
+        prefix = housing.rsplit("/", 1)[0] + "/" if "/" in housing else ""
+        squeeze_id = mj.mj_name2id(
+            self.model, mj.mjtObj.mjOBJ_JOINT, f"{prefix}squeeze"
         )
-        hit = finger[(finger >= 0) & np.isin(geoms[:, ::-1], self._object_geom_ids)]
-        if hit.size:
-            values[hit] = True
-        contacts = dict(zip(self._fingertip_keys, values.tolist()))
-        return contacts, values
+        if squeeze_id < 0:
+            self._squeeze_qposadr = -1
+            self._squeeze_qpos_hi = 0.0
+            return
+        self._squeeze_qposadr = int(self.model.jnt_qposadr[squeeze_id])
+        self._squeeze_qpos_hi = float(self.model.jnt_range[squeeze_id, 1])
+
+    def _terminate_max_timestep(self) -> bool:
+        return self._timestep >= self._max_timestep
+
+    def _terminate_cyringe_dropped(self) -> bool:
+        if self._cyringe_housing_body_id < 0:
+            return False
+        z = float(self.data.xpos[self._cyringe_housing_body_id, 2])
+        return z < self._cyringe_spawn_z - 0.001
+
+    def _terminate_handle_max(self) -> bool:
+        if self._squeeze_qposadr < 0:
+            return False
+        q = float(self.data.qpos[self._squeeze_qposadr])
+        return q >= self._squeeze_qpos_hi
+
+    def _termination_causes(self) -> list[str]:
+        causes: list[str] = []
+        if self._terminate_max_timestep():
+            causes.append("max_timestep")
+        if self._terminate_cyringe_dropped():
+            causes.append("cyringe_dropped")
+        if self._terminate_handle_max():
+            causes.append("handle_max")
+        return causes
 
     def _terminate(self) -> bool:
-        if self._joint_movement_threshold is None:
-            return False
-        assert self._prev_joint_angles is not None
-        joint_angles = read_leap_joint_angles(self.model, self.data)
-        movement = float(np.linalg.norm(joint_angles - self._prev_joint_angles))
-        return movement < self._joint_movement_threshold
+        return bool(self._termination_causes())
 
-
+    def _step_info(self, causes: list[str]) -> dict[str, Any]:
+        if not causes:
+            cause: str | None = None
+        elif len(causes) == 1:
+            cause = causes[0]
+        else:
+            cause = ",".join(causes)
+        return {
+            "termination_cause": cause,
+            "termination_causes": causes,
+        }
 
     def reset(
         self,
@@ -360,24 +424,20 @@ class LeapFlexEnv(gym.Env):
         options: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         super().reset(seed=seed)
-        if self._randomize_on_reset:
-            spawn = self._resolve_spawn(self.np_random)
-            if spawn != self._current_spawn:
-                self._compile_scene(spawn)
-
         mj.mj_resetData(self.model, self.data)
         self.data.ctrl[:] = 0.0
         if self._th_axl_act_id >= 0:
             self._set_actuator_qpos(self._th_axl_act_id, self._th_axl_initial)
+        self._reward.reset(self.model, self.data)
         if options is not None and "qpos" in options:
             self.data.qpos[:] = np.asarray(options["qpos"], dtype=np.float64)
         if options is not None and "ctrl" in options:
             self._set_ctrl(options["ctrl"])
         mj.mj_forward(self.model, self.data)
         self._force_est.reset()
-        self._prev_joint_angles = read_leap_joint_angles(self.model, self.data)
+        self._timestep = 0
         obs = self._get_obs()
-        return obs, {"tetris_spawn": self.tetris_spawn}
+        return obs, {"cyringe_spawn": self.cyringe_spawn}
 
     def step(
         self, action: np.ndarray
@@ -385,14 +445,14 @@ class LeapFlexEnv(gym.Env):
         self._set_ctrl(action)
         for _ in range(self._n_substeps):
             mj.mj_step(self.model, self.data)
-        contact_func = self._get_contact_between_fingers_and_object
-        reward = self._get_reward_func(contact_func)
-        print(f"reward::{reward}")
+        self._timestep += 1
+        reward = self._reward(self.model, self.data)
+        sys.stdout.write(f"  step={self._timestep}/{self._max_timestep}")
+        sys.stdout.flush()
         obs = self._get_obs()
-        done = self._terminate()
-        self._prev_joint_angles = read_leap_joint_angles(self.model, self.data)
-        return obs, reward, done, False, {}
+        causes = self._termination_causes()
+        done = bool(causes)
+        return obs, reward, done, False, self._step_info(causes)
 
     def close(self) -> None:
         return None
-
