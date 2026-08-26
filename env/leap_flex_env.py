@@ -399,7 +399,6 @@ class LeapFlexEnv(gym.Env):
             mj.mj_step(self.model, self.data)
         contact_func = self._get_contact_between_fingers_and_object
         reward = self._get_reward_func(contact_func)
-        print(f"reward::{reward}")
         obs = self._get_obs()
         done = self._terminate()
         self._prev_joint_angles = read_leap_joint_angles(self.model, self.data)

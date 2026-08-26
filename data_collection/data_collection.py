@@ -202,13 +202,19 @@ def _stack_fk(steps: list[dict[str, np.ndarray]]) -> dict[str, np.ndarray]:
 def _episode_arrays(
     actions: list[np.ndarray],
     obs_steps: list[dict[str, Any]],
+    rewards: list[float],
     *,
     step_seconds: float,
 ) -> dict[str, np.ndarray]:
+    if len(rewards) != len(actions):
+        raise ValueError(
+            f"reward length {len(rewards)} != action length {len(actions)}"
+        )
     times = np.arange(len(actions), dtype=np.float64) * step_seconds
     arrays: dict[str, np.ndarray] = {
         "times": times,
         "actions": np.stack(actions, axis=0),
+        "rewards": np.asarray(rewards, dtype=np.float32),
     }
 
     flex_dist = _stack_flex_dict([obs["flex_dist"] for obs in obs_steps])
@@ -244,14 +250,19 @@ def _save_episode(
 class _EpisodeBuffer:
     actions: list[np.ndarray] = field(default_factory=list)
     obs_steps: list[dict[str, Any]] = field(default_factory=list)
+    rewards: list[float] = field(default_factory=list)
 
-    def append(self, action: np.ndarray, obs: dict[str, Any]) -> None:
+    def append(
+        self, action: np.ndarray, obs: dict[str, Any], reward: float
+    ) -> None:
         self.actions.append(np.asarray(action, dtype=np.float64).copy())
         self.obs_steps.append(obs)
+        self.rewards.append(float(np.asarray(reward).reshape(())))
 
     def clear(self) -> None:
         self.actions.clear()
         self.obs_steps.clear()
+        self.rewards.clear()
 
     def __len__(self) -> int:
         return len(self.actions)
@@ -312,8 +323,8 @@ def _collect_single_env(
 
                 step_start = time.time()
                 action = policy.act(obs)
-                obs, _, terminated, truncated, _ = env.step(action)
-                buffer.append(action, obs)
+                obs, reward, terminated, truncated, _ = env.step(action)
+                buffer.append(action, obs, reward)
 
                 if render:
                     viewer.sync()
@@ -342,7 +353,10 @@ def _collect_single_env(
                 "tetris_spawn": reset_info.get("tetris_spawn", env.tetris_spawn),
             }
             arrays = _episode_arrays(
-                buffer.actions, buffer.obs_steps, step_seconds=step_seconds
+                buffer.actions,
+                buffer.obs_steps,
+                buffer.rewards,
+                step_seconds=step_seconds,
             )
             _save_episode(
                 output_dir / f"episode_{episode:04d}.npz",
@@ -380,7 +394,7 @@ def _collect_vector_env(
     pbar = tqdm(total=num_episodes, desc="Collecting episodes")
     while episodes_collected < num_episodes:
         actions = policy.act(obs)
-        obs, _, terminated, truncated, info = env.step(actions)
+        obs, rewards, terminated, truncated, info = env.step(actions)
         reset_mask = np.zeros(num_envs, dtype=np.bool_)
         reset_seeds: list[int | None] = [None] * num_envs
 
@@ -392,7 +406,9 @@ def _collect_vector_env(
             if spawn is not None:
                 slot_tetris_spawns[env_id] = spawn
 
-            buffers[env_id].append(actions[env_id], _slice_obs(obs, env_id))
+            buffers[env_id].append(
+                actions[env_id], _slice_obs(obs, env_id), rewards[env_id]
+            )
             done = bool(terminated[env_id] or truncated[env_id])
             at_max_steps = len(buffers[env_id]) >= max_steps_per_episode
 
@@ -412,6 +428,7 @@ def _collect_vector_env(
             arrays = _episode_arrays(
                 buffers[env_id].actions,
                 buffers[env_id].obs_steps,
+                buffers[env_id].rewards,
                 step_seconds=step_seconds,
             )
             _save_episode(

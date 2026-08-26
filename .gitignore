@@ -1,2 +1,8 @@
 # Ignore data directories anywhere in the repo
 **/data/
+
+# Python bytecode / caches
+**/__pycache__/
+*.py[cod]
+*$py.class
+**.pyc
