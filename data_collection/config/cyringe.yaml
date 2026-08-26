@@ -1,0 +1,26 @@
+collection:
+  episodes: 100
+  duration: 10.0
+  output_dir: data/cyringe
+  seed: 0
+
+env:
+  n_substeps: 1
+  max_timestep: 4000
+  render: true
+  num_envs: 1
+  cyringe:
+    sticky: true
+
+policy:
+  ik_backend: pyroki
+  close_duration: 2.0
+  mcp_target: 0.91
+  pip_target: 1.89
+  dip_target: 0.592
+  handle_site: cyringe/handle
+  reach_tol: 0.008
+  delta_ik_z: 0.0
+  use_trajectory: true
+  traj_stroke: null
+  traj_waypoints: 15

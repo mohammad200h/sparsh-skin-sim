@@ -26,7 +26,7 @@ from util.flex_util import (
 )
 from util.objects_util import add_tetris_part
 
-from env.rewad import Reward
+from env.rewad import SqueezeReward
 
 SCENE_XML = (
     Path(__file__).resolve().parent.parent
@@ -136,7 +136,7 @@ class LeapFlexEnv(gym.Env):
             and self._env_slot is None
         )
 
-        self._get_reward_func = Reward(motion_type= motion_type).get_reward_func()
+        self._get_reward_func = SqueezeReward(motion_type= motion_type).get_reward_func()
 
         if joint_movement_threshold is not None and joint_movement_threshold < 0:
             raise ValueError("joint_movement_threshold must be >= 0")

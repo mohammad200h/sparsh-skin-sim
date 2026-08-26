@@ -33,6 +33,95 @@ def flex_vertex_body_ids(model: mj.MjModel, flex_name: str) -> np.ndarray:
     return np.asarray(model.flex_vertbodyid[adr : adr + n], dtype=np.int32)
 
 
+
+# Fingertip pad-face centre taxels (1-based JSON keys → vertex index key-1).
+# Matches the dome centre used as the probe-press target in the tip layout.
+TIP_PAD_CENTER_TAXELS: tuple[int, ...] = (12, 13, 18, 19)
+
+
+def flex_surface_center(
+    model: mj.MjModel,
+    data: mj.MjData,
+    flex_name: str,
+) -> tuple[int, np.ndarray]:
+    """World-frame centre of a flex pad and the nearest vertex index.
+
+    For 30-vertex fingertip flexes, the centre is the mean of the four pad-face
+    taxels ``TIP_PAD_CENTER_TAXELS``. Otherwise it is the mean of all vertices.
+    Returns ``(closest_vertex_index, center_xyz)``.
+    """
+    fid = flex_id(model, flex_name)
+    vert_adr = int(model.flex_vertadr[fid])
+    vert_num = int(model.flex_vertnum[fid])
+    if vert_num <= 0:
+        raise ValueError(f"Flex '{flex_name}' has no vertices")
+
+    verts = np.asarray(
+        data.flexvert_xpos[vert_adr : vert_adr + vert_num], dtype=np.float64
+    )
+    if flex_name.endswith("_tip") and vert_num >= max(TIP_PAD_CENTER_TAXELS):
+        idxs = [k - 1 for k in TIP_PAD_CENTER_TAXELS]
+        center = verts[idxs].mean(axis=0)
+    else:
+        center = verts.mean(axis=0)
+    closest = int(np.linalg.norm(verts - center, axis=1).argmin())
+    return closest, center.copy()
+
+
+def add_flex_center_ee_site(
+    spec: mj.MjSpec,
+    flex_name: str,
+    *,
+    site_name: str | None = None,
+    size: float = 0.004,
+    rgba: tuple[float, float, float, float] = (0.1, 0.95, 0.2, 1.0),
+    group: int = 0,
+) -> str:
+    """Attach a visible site at the pad-face centre of ``flex_name``.
+
+    Compiles ``spec`` temporarily, finds the flex surface centre (mean of the
+    four central tip taxels, or all vertices), parents a site to the nearest
+    vertex body, and offsets ``site.pos`` in that body frame so the site sits
+    at the true centre — not at a single taxel origin.
+    Returns the site name used.
+    """
+    model = spec.compile()
+    data = mj.MjData(model)
+    mj.mj_forward(model, data)
+
+    ee_vertex, center = flex_surface_center(model, data, flex_name)
+    body_id = int(model.flex_vertbodyid[int(model.flex_vertadr[flex_id(model, flex_name)]) + ee_vertex])
+    body_name = mj.mj_id2name(model, mj.mjtObj.mjOBJ_BODY, body_id)
+    if not body_name:
+        raise RuntimeError(f"Flex '{flex_name}' vertex {ee_vertex} has no body name")
+
+    body = spec.body(body_name)
+    if body is None:
+        raise RuntimeError(f"Spec body '{body_name}' not found")
+
+    # World centre → body-local so the site is not stuck on the taxel origin.
+    body_xpos = np.asarray(data.xpos[body_id], dtype=np.float64)
+    body_xmat = np.asarray(data.xmat[body_id].reshape(3, 3), dtype=np.float64)
+    local_pos = body_xmat.T @ (center - body_xpos)
+
+    name = site_name or f"{flex_name}_ee"
+    existing = spec.site(name) if hasattr(spec, "site") else None
+    if existing is not None:
+        try:
+            spec.delete(existing)
+        except Exception:
+            pass
+
+    body.add_site(
+        name=name,
+        pos=local_pos.tolist(),
+        size=[float(size), 0.0, 0.0],
+        group=int(group),
+        rgba=[float(c) for c in rgba],
+    )
+    return name
+
+
 def flex_joint_ids(model: mj.MjModel, flex_name: str) -> np.ndarray:
     """Joint ids owned by the flex vertex bodies, shape (n_vert, n_jnt_per_vert).
 
