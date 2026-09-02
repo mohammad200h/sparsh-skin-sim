@@ -8,7 +8,7 @@ env:
   n_substeps: 1
   max_timestep: 4000
   render: true
-  num_envs: 1
+  num_envs: 4
   cyringe:
     sticky: true
 

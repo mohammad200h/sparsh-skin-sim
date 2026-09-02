@@ -202,9 +202,10 @@ def thumb_flex_center_ik_generator(
         import pyroki as pk
         import yourdfpy
     except ImportError as exc:  # pragma: no cover
+        venv = Path(__file__).resolve().parents[1] / ".venv" / "bin" / "python"
         raise ImportError(
-            "IK backend 'pyroki' requires pyroki and yourdfpy "
-            "(pip install 'pyroki @ git+https://github.com/chungmin99/pyroki.git')."
+            "IK backend 'pyroki' failed to import "
+            f"({exc}). Use {venv} — system JAX 0.4.14 (DreamerV3) cannot load pyroki."
         ) from exc
 
     from util.flex_util import flex_id, flex_surface_center

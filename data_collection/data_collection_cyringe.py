@@ -9,6 +9,10 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from util.project_venv import exec_project_venv
+
+exec_project_venv()
+
 import argparse
 import json
 import time
@@ -186,18 +190,6 @@ def _slice_obs(obs: dict[str, Any], index: int) -> dict[str, Any]:
     }
 
 
-def _set_obs_slice(
-    obs: dict[str, Any], index: int, obs_i: dict[str, Any]
-) -> dict[str, Any]:
-    for name, values in obs_i["flex_dist"].items():
-        obs["flex_dist"][name][index] = values
-    for name, values in obs_i["flex_force"].items():
-        obs["flex_force"][name][index] = values
-    for key, values in obs_i["flex_taxel_fk"].items():
-        obs["flex_taxel_fk"][key][index] = values
-    return obs
-
-
 def _stack_flex_dict(steps: list[dict[str, np.ndarray]]) -> dict[str, np.ndarray]:
     if not steps:
         return {}
@@ -219,13 +211,19 @@ def _stack_fk(steps: list[dict[str, np.ndarray]]) -> dict[str, np.ndarray]:
 def _episode_arrays(
     actions: list[np.ndarray],
     obs_steps: list[dict[str, Any]],
+    rewards: list[float],
     *,
     step_seconds: float,
 ) -> dict[str, np.ndarray]:
+    if len(rewards) != len(actions):
+        raise ValueError(
+            f"reward length {len(rewards)} != action length {len(actions)}"
+        )
     times = np.arange(len(actions), dtype=np.float64) * step_seconds
     arrays: dict[str, np.ndarray] = {
         "times": times,
         "actions": np.stack(actions, axis=0),
+        "rewards": np.asarray(rewards, dtype=np.float32),
     }
 
     flex_dist = _stack_flex_dict([obs["flex_dist"] for obs in obs_steps])
@@ -261,14 +259,19 @@ def _save_episode(
 class _EpisodeBuffer:
     actions: list[np.ndarray] = field(default_factory=list)
     obs_steps: list[dict[str, Any]] = field(default_factory=list)
+    rewards: list[float] = field(default_factory=list)
 
-    def append(self, action: np.ndarray, obs: dict[str, Any]) -> None:
+    def append(
+        self, action: np.ndarray, obs: dict[str, Any], reward: float
+    ) -> None:
         self.actions.append(np.asarray(action, dtype=np.float64).copy())
         self.obs_steps.append(obs)
+        self.rewards.append(float(np.asarray(reward).reshape(())))
 
     def clear(self) -> None:
         self.actions.clear()
         self.obs_steps.clear()
+        self.rewards.clear()
 
     def __len__(self) -> int:
         return len(self.actions)
@@ -314,8 +317,8 @@ def _collect_single_env(
 
                 step_start = time.time()
                 action = policy.act(obs)
-                obs, _, terminated, truncated, _ = env.step(action)
-                buffer.append(action, obs)
+                obs, reward, terminated, truncated, _ = env.step(action)
+                buffer.append(action, obs, reward)
 
                 if render:
                     viewer.sync()
@@ -344,7 +347,10 @@ def _collect_single_env(
                 "cyringe_spawn": reset_info.get("cyringe_spawn", env.cyringe_spawn),
             }
             arrays = _episode_arrays(
-                buffer.actions, buffer.obs_steps, step_seconds=step_seconds
+                buffer.actions,
+                buffer.obs_steps,
+                buffer.rewards,
+                step_seconds=step_seconds,
             )
             _save_episode(
                 output_dir / f"episode_{episode:04d}.npz",
@@ -380,13 +386,18 @@ def _collect_vector_env(
     pbar = tqdm(total=num_episodes, desc="Collecting episodes")
     while episodes_collected < num_episodes:
         actions = policy.act(obs)
-        obs, _, terminated, truncated, _ = env.step(actions)
+        obs, rewards, terminated, truncated, _ = env.step(actions)
+
+        reset_mask = np.zeros(num_envs, dtype=np.bool_)
+        reset_seeds: list[int | None] = [None] * num_envs
 
         for env_id in range(num_envs):
             if episodes_collected >= num_episodes:
                 break
 
-            buffers[env_id].append(actions[env_id], _slice_obs(obs, env_id))
+            buffers[env_id].append(
+                actions[env_id], _slice_obs(obs, env_id), rewards[env_id]
+            )
             done = bool(terminated[env_id] or truncated[env_id])
             at_max_steps = len(buffers[env_id]) >= max_steps_per_episode
 
@@ -406,6 +417,7 @@ def _collect_vector_env(
             arrays = _episode_arrays(
                 buffers[env_id].actions,
                 buffers[env_id].obs_steps,
+                buffers[env_id].rewards,
                 step_seconds=step_seconds,
             )
             _save_episode(
@@ -417,12 +429,19 @@ def _collect_vector_env(
             episodes_collected += 1
             pbar.update(1)
 
-            reset_seed = None if episode_seed is None else episode_seed + num_envs
-            obs_i, reset_info = env.envs[env_id].reset(seed=reset_seed)
-            slot_spawns[env_id] = reset_info.get(
-                "cyringe_spawn", env.envs[env_id].cyringe_spawn
+            reset_mask[env_id] = True
+            reset_seeds[env_id] = (
+                None if episode_seed is None else episode_seed + num_envs
             )
-            obs = _set_obs_slice(obs, env_id, obs_i)
+
+        if not reset_mask.any():
+            continue
+
+        # Resetting sub-envs directly leaves SyncVectorEnv's done flags set, and
+        # AutoresetMode.DISABLED refuses to step a slot that still looks done.
+        obs, _ = env.reset(seed=reset_seeds, options={"reset_mask": reset_mask})
+        for env_id in np.flatnonzero(reset_mask).tolist():
+            slot_spawns[env_id] = env.envs[env_id].cyringe_spawn
             policy.reset(env_id)
 
     pbar.close()
