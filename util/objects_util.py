@@ -20,6 +20,9 @@ DEFAULT_CYRINGE_CLEARANCE = 0.02
 # Sliding / torsional / rolling; housing is bumped up for a grippier barrel.
 DEFAULT_CYRINGE_FRICTION = (0.1, 0.005, 0.0001)
 DEFAULT_CYRINGE_HOUSING_FRICTION = (0.0, 0.0, 2.5)
+# Same as flex contact solref in generatehand_flexcom_sensor.py. Needed when
+# cyringe geoms share flex priority so the mix stays soft on the skins.
+DEFAULT_CYRINGE_SOLREF = (0.01, 1.0)
 # Unscaled mesh AABB half-height (~0.21 m tall); used for spawn clearance.
 _CYRINGE_HALF_HEIGHT = 0.106
 
@@ -1058,6 +1061,11 @@ def add_cyringe(
             geom.group = 0
             geom.condim = 3
             geom.friction = list(friction)
+            # Match flex contact priority (1) so housing_friction can mix
+            # instead of being ignored by the skins. Copy flex solref so the
+            # mix does not inherit the default geom 0.02 timeconst.
+            geom.priority = 1
+            geom.solref = list(DEFAULT_CYRINGE_SOLREF)
 
     housing_body = child.body("housing")
     if housing_body is not None:

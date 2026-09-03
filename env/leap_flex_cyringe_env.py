@@ -462,7 +462,7 @@ class LeapFlexCyringeEnv(gym.Env):
         if self._cyringe_housing_body_id < 0:
             return False
         z = float(self.data.xpos[self._cyringe_housing_body_id, 2])
-        return z < self._cyringe_spawn_z - 0.001
+        return z < self._cyringe_spawn_z - 0.1
 
     def _terminate_handle_max(self) -> bool:
         if self._squeeze_qposadr < 0:
