@@ -1,0 +1,33 @@
+collection:
+  episodes: 100
+  duration: 10.0
+  output_dir: data/cyringe_random_policy
+  seed: 0
+
+env:
+  n_substeps: 1
+  max_timestep: 4000
+  render: true
+  num_envs: 1
+  cyringe:
+    sticky: false
+  domain_randomization:
+    enabled: true
+    hand:
+      enabled: true
+    cyringe:
+      enabled: true
+      offset_low: [-0.02, -0.02, 0.0]
+      offset_high: [0.02, 0.02, 0.0]
+      euler_delta_low: [0.0, 0.0, -0.4]
+      euler_delta_high: [0.0, 0.0, 0.4]
+  
+  discared_episode:
+    termination_causes:
+      - flex_exploded
+      - sim_unstable
+      - cyringe_flying
+
+policy:
+  type: random
+  action_hold: 40

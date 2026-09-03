@@ -20,6 +20,11 @@ DEFAULT_CYRINGE_CLEARANCE = 0.02
 # Sliding / torsional / rolling; housing is bumped up for a grippier barrel.
 DEFAULT_CYRINGE_FRICTION = (0.1, 0.005, 0.0001)
 DEFAULT_CYRINGE_HOUSING_FRICTION = (0.0, 0.0, 2.5)
+# Flex skins compile with contact priority=1. A lower geom priority makes
+# MuJoCo use the flex friction (0.8) and condim (3), so JSON cyringe friction
+# never reaches the solver. Match priority and use condim=6 so all 3 coeffs apply.
+DEFAULT_CYRINGE_CONTACT_PRIORITY = 1
+DEFAULT_CYRINGE_CONDIM = 6
 # Unscaled mesh AABB half-height (~0.21 m tall); used for spawn clearance.
 _CYRINGE_HALF_HEIGHT = 0.106
 
@@ -1056,7 +1061,8 @@ def add_cyringe(
             geom.contype = int(contype)
             geom.conaffinity = int(conaffinity)
             geom.group = 0
-            geom.condim = 3
+            geom.priority = int(DEFAULT_CYRINGE_CONTACT_PRIORITY)
+            geom.condim = int(DEFAULT_CYRINGE_CONDIM)
             geom.friction = list(friction)
 
     housing_body = child.body("housing")
@@ -1065,6 +1071,8 @@ def add_cyringe(
         for geom in housing_body.geoms:
             if int(geom.contype) or int(geom.conaffinity):
                 geom.friction = housing_mu
+                geom.priority = int(DEFAULT_CYRINGE_CONTACT_PRIORITY)
+                geom.condim = int(DEFAULT_CYRINGE_CONDIM)
 
     spawn = np.asarray(spawn, dtype=np.float64)
     frame = spec.worldbody.add_frame(
@@ -1079,3 +1087,80 @@ def add_cyringe(
             f"Failed to attach cyringe: body '{prefix}housing' not found"
         )
     return housing, spawn
+
+
+def euler_xyz_to_quat(euler: Sequence[float]) -> np.ndarray:
+    """Convert XYZ intrinsic Euler angles (radians) to MuJoCo quat (w, x, y, z)."""
+    e = np.asarray(euler, dtype=np.float64).reshape(-1)
+    if e.size != 3:
+        raise ValueError(f"euler must be length-3 (xyz rad), got {euler!r}")
+    return _euler_xyz_to_quat(e)
+
+
+def cyringe_housing_freejoint_id(model: mj.MjModel, housing_name: str) -> int:
+    """Return the housing freejoint id, or ``-1`` if the barrel is welded."""
+    body_id = mj.mj_name2id(model, mj.mjtObj.mjOBJ_BODY, housing_name)
+    if body_id < 0:
+        raise ValueError(f"Cyringe housing '{housing_name}' not found")
+    jntadr = int(model.body_jntadr[body_id])
+    jntnum = int(model.body_jntnum[body_id])
+    if jntadr < 0 or jntnum < 1:
+        return -1
+    for k in range(jntnum):
+        jid = jntadr + k
+        if int(model.jnt_type[jid]) == int(mj.mjtJoint.mjJNT_FREE):
+            return int(jid)
+    return -1
+
+
+def cyringe_housing_pose(
+    model: mj.MjModel,
+    data: mj.MjData,
+    housing_name: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    """World-frame housing position and quaternion (wxyz)."""
+    body_id = mj.mj_name2id(model, mj.mjtObj.mjOBJ_BODY, housing_name)
+    if body_id < 0:
+        raise ValueError(f"Cyringe housing '{housing_name}' not found")
+    return (
+        np.asarray(data.xpos[body_id], dtype=np.float64).copy(),
+        np.asarray(data.xquat[body_id], dtype=np.float64).copy(),
+    )
+
+
+def set_cyringe_pose(
+    model: mj.MjModel,
+    data: mj.MjData,
+    housing_name: str,
+    pos: Sequence[float],
+    *,
+    quat: Sequence[float] | None = None,
+    euler: Sequence[float] | None = None,
+) -> None:
+    """Teleport the cyringe housing via its freejoint (world xyz + wxyz quat).
+
+    Parent is world after ``add_cyringe``, so freejoint qpos is the world pose.
+    Pass ``euler`` (XYZ rad) or ``quat`` (wxyz); if both are omitted the current
+    orientation is kept. Velocities on the freejoint are zeroed.
+    """
+    jid = cyringe_housing_freejoint_id(model, housing_name)
+    if jid < 0:
+        raise ValueError(
+            f"Housing '{housing_name}' has no freejoint; cannot set pose "
+            "(sticky housing is welded in world)"
+        )
+    xyz = np.asarray(pos, dtype=np.float64).reshape(-1)
+    if xyz.size != 3:
+        raise ValueError(f"pos must be length-3 (xyz), got {pos!r}")
+
+    qadr = int(model.jnt_qposadr[jid])
+    if quat is None and euler is None:
+        orientation = np.asarray(data.qpos[qadr + 3 : qadr + 7], dtype=np.float64)
+    else:
+        orientation = _resolve_tetris_quat(quat, euler)
+
+    data.qpos[qadr : qadr + 3] = xyz
+    data.qpos[qadr + 3 : qadr + 7] = orientation
+    dadr = int(model.jnt_dofadr[jid])
+    data.qvel[dadr : dadr + 6] = 0.0
+

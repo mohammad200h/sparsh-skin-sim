@@ -13,6 +13,10 @@ import mujoco as mj
 import numpy as np
 from gymnasium import spaces
 
+from env.domain_randomization.cytinge_dr import (
+    CyringeDomainRandomizationConfig,
+    CyringeEpisodeSample,
+)
 from env.rewad import SqueezeCyringeReward
 from util.fk_taxel_util import (
     LEAP_JOINT_ORDER,
@@ -33,7 +37,12 @@ from util.ik_common import (
     DEFAULT_THUMB_FLEX,
     add_ik_goal_mocap,
 )
-from util.objects_util import add_cyringe
+from util.objects_util import (
+    add_cyringe,
+    cyringe_housing_freejoint_id,
+    cyringe_housing_pose,
+    set_cyringe_pose,
+)
 from util.trajectory_generation import add_trajectory_mocaps
 
 SCENE_XML = (
@@ -42,6 +51,10 @@ SCENE_XML = (
     / "scene_mjx_cube_CoACD_mjx_flex_sensor.xml"
 )
 ENV_CONFIG_JSON = Path(__file__).resolve().parent / "env_config.json"
+# Flex skins often explode with huge but finite stretch (no NaNs / BADQ warnings).
+FLEX_EXPLODE_STRETCH = 5.0  # edge length / rest length
+FLEX_EXPLODE_POS_M = 2.0  # max |vertex| from origin [m]
+CYRINGE_FLYING_VZ_M_S = 3.0  # |housing COM vz| [m/s] counts as flying
 
 
 def load_env_config(path: Path | str | None = None) -> dict[str, Any]:
@@ -54,6 +67,51 @@ def _xyz(value: Any, key: str) -> tuple[float, float, float]:
     if not isinstance(value, (list, tuple)) or len(value) != 3:
         raise ValueError(f"{key} must be an [x, y, z] triplet")
     return (float(value[0]), float(value[1]), float(value[2]))
+
+
+_FRICTION_KEYS = ("sliding", "torsional", "rolling")
+_DEFAULT_FRICTION = {
+    "sliding": 0.1,
+    "torsional": 0.005,
+    "rolling": 0.0001,
+}
+_DEFAULT_HOUSING_FRICTION = {
+    "sliding": 0.0,
+    "torsional": 0.0,
+    "rolling": 2.5,
+}
+
+
+def _friction_dict(
+    triplet: tuple[float, float, float],
+) -> dict[str, float]:
+    return {
+        "sliding": float(triplet[0]),
+        "torsional": float(triplet[1]),
+        "rolling": float(triplet[2]),
+    }
+
+
+def _friction_triplet(value: Any, key: str) -> tuple[float, float, float]:
+    """Parse MuJoCo geom friction as ``{sliding, torsional, rolling}`` or a 3-list."""
+    if isinstance(value, dict):
+        missing = [name for name in _FRICTION_KEYS if name not in value]
+        if missing:
+            raise ValueError(
+                f"{key} must contain {list(_FRICTION_KEYS)}, missing {missing}"
+            )
+        extra = [name for name in value if name not in _FRICTION_KEYS]
+        if extra:
+            raise ValueError(
+                f"{key} has unknown keys {extra}; expected {list(_FRICTION_KEYS)}"
+            )
+        return tuple(float(value[name]) for name in _FRICTION_KEYS)
+    if isinstance(value, (list, tuple)) and len(value) == 3:
+        return (float(value[0]), float(value[1]), float(value[2]))
+    raise ValueError(
+        f"{key} must be a mapping with keys {list(_FRICTION_KEYS)} "
+        "or a 3-list [sliding, torsional, rolling]"
+    )
 
 
 @dataclass(frozen=True)
@@ -75,8 +133,8 @@ class CyringeSpawn:
             "offset": list(self.offset),
             "euler": list(self.euler),
             "sticky": self.sticky,
-            "friction": list(self.friction),
-            "housing_friction": list(self.housing_friction),
+            "friction": _friction_dict(self.friction),
+            "housing_friction": _friction_dict(self.housing_friction),
         }
 
     @classmethod
@@ -104,12 +162,12 @@ class CyringeSpawn:
             offset=spawn_offset,
             euler=spawn_euler,
             sticky=bool(raw.get("sticky", False)),
-            friction=_xyz(
-                raw.get("friction", [0.1, 0.005, 0.0001]),
+            friction=_friction_triplet(
+                raw.get("friction", _DEFAULT_FRICTION),
                 "cyringe.friction",
             ),
-            housing_friction=_xyz(
-                raw.get("housing_friction", [0.0, 0.0, 2.5]),
+            housing_friction=_friction_triplet(
+                raw.get("housing_friction", _DEFAULT_HOUSING_FRICTION),
                 "cyringe.housing_friction",
             ),
         )
@@ -129,6 +187,10 @@ class LeapFlexCyringeEnv(gym.Env):
     (or a named flex), default offset ``(0.01, 0.05, -0.12)``, and a 90°
     side-lay euler ``(0, π/2, -π/2)`` plus optional yaw. Defaults live in
     ``env/env_config.json``.
+
+    Domain randomization (when enabled) samples a new hand qpos and cyringe
+    freejoint pose on every ``reset()``. Pose DR requires a free housing
+    (``cyringe.sticky=False``).
     """
 
     metadata = {"render_modes": []}
@@ -147,12 +209,32 @@ class LeapFlexCyringeEnv(gym.Env):
         cyringe: dict[str, Any] | None = None,
         ik_helpers: bool = True,
         n_traj_waypoints: int | None = None,
+        randomize_hand: bool | None = None,
+        randomize_cyringe: bool | None = None,
+        domain_randomization: (
+            CyringeDomainRandomizationConfig | dict[str, Any] | None
+        ) = None,
     ) -> None:
         super().__init__()
         cfg = load_env_config(config_path)
         cyringe_cfg = dict(cfg.get("cyringe", {}))
         if cyringe is not None:
             cyringe_cfg.update(cyringe)
+        json_dr = cfg.get("domain_randomization")
+        if domain_randomization is not None:
+            self._domain_randomization = CyringeDomainRandomizationConfig.resolve(
+                domain_randomization,
+                json_dr,
+            )
+        else:
+            self._domain_randomization = (
+                CyringeDomainRandomizationConfig.from_env_config(
+                    json_dr,
+                    randomize_hand=randomize_hand,
+                    randomize_cyringe=randomize_cyringe,
+                )
+            )
+        self._episode_dr: CyringeEpisodeSample | None = None
 
         self._scene_xml = Path(scene_xml) if scene_xml is not None else SCENE_XML
         if not self._scene_xml.is_file():
@@ -187,6 +269,8 @@ class LeapFlexCyringeEnv(gym.Env):
 
         self._cyringe_housing_name: str | None = None
         self._cyringe_housing_body_id = -1
+        self._cyringe_freejoint_id = -1
+        self._cyringe_spawn_pos = np.zeros(3, dtype=np.float64)
         self._cyringe_spawn_z = 0.0
         self._squeeze_qposadr = -1
         self._squeeze_qpos_hi = 0.0
@@ -218,7 +302,8 @@ class LeapFlexCyringeEnv(gym.Env):
             housing_friction=spawn.housing_friction,
         )
         self._cyringe_housing_name = housing.name
-        self._cyringe_spawn_z = float(np.asarray(spawn_pos, dtype=np.float64)[2])
+        self._cyringe_spawn_pos = np.asarray(spawn_pos, dtype=np.float64).copy()
+        self._cyringe_spawn_z = float(self._cyringe_spawn_pos[2])
 
         self.ee_site = None
         self.goal_mocap = None
@@ -251,6 +336,18 @@ class LeapFlexCyringeEnv(gym.Env):
             self.model, mj.mjtObj.mjOBJ_ACTUATOR, "th_axl_act"
         )
         self._reward.bind(self.model, self._cyringe_housing_name)
+        self._cyringe_freejoint_id = cyringe_housing_freejoint_id(
+            self.model, self._cyringe_housing_name
+        )
+        if (
+            self._domain_randomization is not None
+            and self._domain_randomization.randomize_cyringe
+            and self._cyringe_freejoint_id < 0
+        ):
+            raise ValueError(
+                "Cyringe pose domain randomization requires a free housing "
+                "(set cyringe.sticky=False)"
+            )
         self._cache_termination_ids()
 
         self._flex_names = list_flex_names(self.model)
@@ -333,6 +430,36 @@ class LeapFlexCyringeEnv(gym.Env):
         self.data.ctrl[act_id] = float(value)
         self.data.qpos[int(self.model.jnt_qposadr[joint_id])] = float(value)
 
+    def _apply_hand_qpos(self, qpos: np.ndarray) -> None:
+        qpos = np.asarray(qpos, dtype=np.float64).reshape(len(LEAP_JOINT_ORDER))
+        qpos = np.clip(qpos, self._ctrl_lo, self._ctrl_hi)
+        for act_id, value in zip(self._actuator_ids, qpos):
+            self._set_actuator_qpos(int(act_id), float(value))
+
+    def _apply_episode_randomization(self, sample: CyringeEpisodeSample) -> None:
+        if sample.hand_qpos is not None:
+            self._apply_hand_qpos(np.asarray(sample.hand_qpos, dtype=np.float64))
+        if self._domain_randomization is None or not (
+            self._domain_randomization.randomize_cyringe
+        ):
+            return
+        if self._cyringe_housing_name is None:
+            return
+        pos = self._cyringe_spawn_pos + np.asarray(
+            sample.cyringe_offset, dtype=np.float64
+        )
+        euler = np.asarray(self._current_spawn.euler, dtype=np.float64) + np.asarray(
+            sample.cyringe_euler_delta, dtype=np.float64
+        )
+        set_cyringe_pose(
+            self.model,
+            self.data,
+            self._cyringe_housing_name,
+            pos,
+            euler=euler,
+        )
+        self._cyringe_spawn_z = float(pos[2])
+
     def _get_obs(self) -> dict[str, Any]:
         forces = self._force_est.update(self.model, self.data)
         flex_dist = {
@@ -384,22 +511,81 @@ class LeapFlexCyringeEnv(gym.Env):
         if self._cyringe_housing_body_id < 0:
             return False
         z = float(self.data.xpos[self._cyringe_housing_body_id, 2])
+        if not np.isfinite(z):
+            return False
         return z < self._cyringe_spawn_z - 0.001
 
-    def _terminate_handle_max(self) -> bool:
+    def _terminate_cyringe_flying(self) -> bool:
+        if self._cyringe_housing_body_id < 0:
+            return False
+        vz = float(self.data.cvel[self._cyringe_housing_body_id, 5])
+        if not np.isfinite(vz):
+            return False
+        return abs(vz) > CYRINGE_FLYING_VZ_M_S
+
+    def _terminate_cyringe_handle_fully_pressed(self) -> bool:
         if self._squeeze_qposadr < 0:
             return False
         q = float(self.data.qpos[self._squeeze_qposadr])
+        if not np.isfinite(q):
+            return False
         return q >= self._squeeze_qpos_hi
+
+    def _terminate_flex_exploded(self) -> bool:
+        """True when a flex skin stretches or flies apart while still finite."""
+        if int(self.model.nflexvert) > 0:
+            verts = np.asarray(self.data.flexvert_xpos)
+            if np.isfinite(verts).all() and float(np.max(np.abs(verts))) > FLEX_EXPLODE_POS_M:
+                return True
+
+        if int(self.model.nflexedge) > 0:
+            length = np.asarray(self.data.flexedge_length)
+            rest = np.asarray(self.model.flexedge_length0)
+            if np.isfinite(length).all():
+                valid = rest > 1e-9
+                if valid.any():
+                    stretch = float(np.max(length[valid] / rest[valid]))
+                    if stretch > FLEX_EXPLODE_STRETCH:
+                        return True
+        return False
+
+    def _terminate_sim_unstable(self) -> bool:
+        """True when the solver produces NaNs/Infs or BADQ warnings."""
+        if not (
+            np.isfinite(self.data.qpos).all()
+            and np.isfinite(self.data.qvel).all()
+            and np.isfinite(self.data.qacc).all()
+        ):
+            return True
+        if int(self.model.nflexvert) > 0 and not np.isfinite(
+            self.data.flexvert_xpos
+        ).all():
+            return True
+        if int(self.model.nflexedge) > 0 and not np.isfinite(
+            self.data.flexedge_length
+        ).all():
+            return True
+        warning = self.data.warning
+        return (
+            int(warning[mj.mjtWarning.mjWARN_BADQPOS].number)
+            + int(warning[mj.mjtWarning.mjWARN_BADQVEL].number)
+            + int(warning[mj.mjtWarning.mjWARN_BADQACC].number)
+        ) > 0
 
     def _termination_causes(self) -> list[str]:
         causes: list[str] = []
+        if self._terminate_flex_exploded():
+            causes.append("flex_exploded")
+        if self._terminate_sim_unstable():
+            causes.append("sim_unstable")
         if self._terminate_max_timestep():
             causes.append("max_timestep")
         if self._terminate_cyringe_dropped():
             causes.append("cyringe_dropped")
-        if self._terminate_handle_max():
-            causes.append("handle_max")
+        if self._terminate_cyringe_flying():
+            causes.append("cyringe_flying")
+        if self._terminate_cyringe_handle_fully_pressed():
+            causes.append("cyringe_handle_fully_pressed")
         return causes
 
     def _terminate(self) -> bool:
@@ -415,6 +601,8 @@ class LeapFlexCyringeEnv(gym.Env):
         return {
             "termination_cause": cause,
             "termination_causes": causes,
+            "flex_exploded": "flex_exploded" in causes,
+            "sim_unstable": "sim_unstable" in causes,
         }
 
     def reset(
@@ -428,6 +616,15 @@ class LeapFlexCyringeEnv(gym.Env):
         self.data.ctrl[:] = 0.0
         if self._th_axl_act_id >= 0:
             self._set_actuator_qpos(self._th_axl_act_id, self._th_axl_initial)
+        self._cyringe_spawn_z = float(self._cyringe_spawn_pos[2])
+        self._episode_dr = None
+        if self._domain_randomization is not None:
+            self._episode_dr = self._domain_randomization.sample(
+                self.np_random,
+                hand_lo=self._ctrl_lo,
+                hand_hi=self._ctrl_hi,
+            )
+            self._apply_episode_randomization(self._episode_dr)
         self._reward.reset(self.model, self.data)
         if options is not None and "qpos" in options:
             self.data.qpos[:] = np.asarray(options["qpos"], dtype=np.float64)
@@ -437,7 +634,17 @@ class LeapFlexCyringeEnv(gym.Env):
         self._force_est.reset()
         self._timestep = 0
         obs = self._get_obs()
-        return obs, {"cyringe_spawn": self.cyringe_spawn}
+        info: dict[str, Any] = {"cyringe_spawn": self.cyringe_spawn}
+        if self._episode_dr is not None:
+            dr_info = self._episode_dr.as_dict()
+            if self._cyringe_housing_name is not None:
+                pos, quat = cyringe_housing_pose(
+                    self.model, self.data, self._cyringe_housing_name
+                )
+                dr_info["cyringe_pos"] = pos.tolist()
+                dr_info["cyringe_quat"] = quat.tolist()
+            info["domain_randomization"] = dr_info
+        return obs, info
 
     def step(
         self, action: np.ndarray
