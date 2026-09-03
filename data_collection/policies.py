@@ -132,6 +132,8 @@ class CyringeMotionParams:
 class CyringePolicy:
     """MF/RF close + thumb IK policy matching ``demos/env_cyringe_demo.py``."""
 
+    motion_name = "cyringe_two_phase"
+
     def __init__(
         self,
         model: mj.MjModel,
@@ -214,6 +216,8 @@ class CyringePolicy:
 class VectorCyringePolicy:
     """Independent cyringe policies for each vector-env slot."""
 
+    motion_name = "cyringe_two_phase"
+
     def __init__(self, policies: list[CyringePolicy]) -> None:
         if not policies:
             raise ValueError("policies must be non-empty")
@@ -225,6 +229,119 @@ class VectorCyringePolicy:
 
     @property
     def profile(self) -> CyringeMotionParams:
+        return self._policies[0].profile
+
+    def reset(self, env_id: int | None = None) -> None:
+        if env_id is None:
+            for policy in self._policies:
+                policy.reset()
+            return
+        self._policies[env_id].reset()
+
+    def act(self, obs: dict | None = None) -> np.ndarray:
+        del obs
+        return np.stack([policy.act({}) for policy in self._policies])
+
+
+@dataclass(frozen=True)
+class RandomMotionParams:
+    """Tunables for uniform random joint targets held for several steps."""
+
+    action_hold: int = 40
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any] | None) -> RandomMotionParams:
+        if not raw:
+            return cls()
+        known = {f.name for f in fields(cls)}
+        kwargs = {k: v for k, v in raw.items() if k in known}
+        if "action_hold" in kwargs:
+            hold = int(kwargs["action_hold"])
+            if hold < 1:
+                raise ValueError("policy.action_hold must be at least 1")
+            kwargs["action_hold"] = hold
+        return cls(**kwargs)
+
+
+class RandomPolicy:
+    """Open-loop random joint targets, reused for ``action_hold`` env steps.
+
+    Matches ``demos/env_cyringe_domain_randomiztion_random_policy.py``: each
+    sample is drawn uniformly in ``[low, high]`` (actuator ctrlrange) and held
+    so the hand moves smoothly instead of jumping every physics step.
+    """
+
+    motion_name = "random"
+
+    def __init__(
+        self,
+        low: np.ndarray,
+        high: np.ndarray,
+        *,
+        params: RandomMotionParams | dict[str, Any] | None = None,
+        seed: int | None = None,
+    ) -> None:
+        self._low = np.asarray(low, dtype=np.float64).reshape(-1)
+        self._high = np.asarray(high, dtype=np.float64).reshape(-1)
+        if self._low.shape != self._high.shape:
+            raise ValueError("low and high must have the same shape")
+        if np.any(self._low > self._high):
+            raise ValueError("low must be <= high componentwise")
+        self._params = (
+            params
+            if isinstance(params, RandomMotionParams)
+            else RandomMotionParams.from_dict(params)
+        )
+        self._seed = seed
+        self._n_resets = 0
+        self._rng = np.random.default_rng(seed)
+        self._hold_left = 0
+        self._action: np.ndarray | None = None
+
+    @property
+    def params(self) -> RandomMotionParams:
+        return self._params
+
+    @property
+    def profile(self) -> RandomMotionParams:
+        """Alias so collectors can read ``policy.profile`` like grasp policies."""
+        return self._params
+
+    def reset(self) -> None:
+        """Clear the held action and reseed from ``seed + reset_index``."""
+        if self._seed is not None:
+            self._rng = np.random.default_rng(self._seed + self._n_resets)
+        self._n_resets += 1
+        self._hold_left = 0
+        self._action = None
+
+    def act(self, obs: dict | None = None) -> np.ndarray:
+        """Return the current (possibly held) joint-position target."""
+        del obs
+        if self._hold_left <= 0:
+            self._action = self._rng.uniform(self._low, self._high)
+            self._hold_left = int(self._params.action_hold)
+        assert self._action is not None
+        self._hold_left -= 1
+        return np.asarray(self._action, dtype=np.float64).copy()
+
+
+class VectorRandomPolicy:
+    """Independent random policies for each vector-env slot."""
+
+    motion_name = "random"
+
+    def __init__(self, policies: list[RandomPolicy]) -> None:
+        if not policies:
+            raise ValueError("policies must be non-empty")
+        self._policies = policies
+
+    @property
+    def params(self) -> RandomMotionParams:
+        return self._policies[0].params
+
+    @property
+    def profile(self) -> RandomMotionParams:
         return self._policies[0].profile
 
     def reset(self, env_id: int | None = None) -> None:

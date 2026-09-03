@@ -10,7 +10,19 @@ env:
   render: true
   num_envs: 4
   cyringe:
-    sticky: true
+    sticky: false
+
+  domain_randomization:
+    enabled: true
+    hand:
+      enabled: false
+    cyringe:
+      enabled: true
+      offset_low: [-0.02, -0.02, 0.0]
+      offset_high: [0.02, 0.02, 0.0]
+      euler_delta_low: [0.0, 0.0, -0.1]
+      euler_delta_high: [0.0, 0.0, 0.1]
+
 
 policy:
   ik_backend: pyroki

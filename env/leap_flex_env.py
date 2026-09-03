@@ -11,7 +11,7 @@ import numpy as np
 from gymnasium import spaces
 from util.motion_util import GRASP_PATTERNS
 
-from env.domain_randomization import DomainRandomizationConfig, TetrisSpawn
+from env.domain_randomization.flex_dr import DomainRandomizationConfig, TetrisSpawn
 from util.fk_taxel_util import (
     LEAP_JOINT_ORDER,
     N_TAXELS,

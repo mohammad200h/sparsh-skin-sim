@@ -17,5 +17,18 @@
     "sticky": false,
     "friction": [0.1, 0.005, 0.0001],
     "housing_friction": [1.0, 0.0, 1.0]
+  },
+  "domain_randomization": {
+    "enabled": false,
+    "hand": {
+      "enabled": true
+    },
+    "cyringe": {
+      "enabled": true,
+      "offset_low": [-0.02, -0.02, 0.0],
+      "offset_high": [0.02, 0.02, 0.0],
+      "euler_delta_low": [0.0, 0.0, -0.4],
+      "euler_delta_high": [0.0, 0.0, 0.4]
+    }
   }
 }

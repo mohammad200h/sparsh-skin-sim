@@ -13,6 +13,10 @@ import mujoco as mj
 import numpy as np
 from gymnasium import spaces
 
+from env.domain_randomization.cytinge_dr import (
+    CyringeDomainRandomizationConfig,
+    CyringeEpisodeSample,
+)
 from env.rewad import SqueezeCyringeReward
 from util.fk_taxel_util import (
     LEAP_JOINT_ORDER,
@@ -33,7 +37,12 @@ from util.ik_common import (
     DEFAULT_THUMB_FLEX,
     add_ik_goal_mocap,
 )
-from util.objects_util import add_cyringe
+from util.objects_util import (
+    add_cyringe,
+    cyringe_housing_freejoint_id,
+    cyringe_housing_pose,
+    set_cyringe_pose,
+)
 from util.trajectory_generation import add_trajectory_mocaps
 
 SCENE_XML = (
@@ -129,6 +138,10 @@ class LeapFlexCyringeEnv(gym.Env):
     (or a named flex), default offset ``(0.01, 0.05, -0.12)``, and a 90°
     side-lay euler ``(0, π/2, -π/2)`` plus optional yaw. Defaults live in
     ``env/env_config.json``.
+
+    Domain randomization (when enabled) samples a new hand qpos and cyringe
+    freejoint pose on every ``reset()``. Pose DR requires a free housing
+    (``sticky=false``).
     """
 
     metadata = {"render_modes": []}
@@ -147,12 +160,32 @@ class LeapFlexCyringeEnv(gym.Env):
         cyringe: dict[str, Any] | None = None,
         ik_helpers: bool = True,
         n_traj_waypoints: int | None = None,
+        randomize_hand: bool | None = None,
+        randomize_cyringe: bool | None = None,
+        domain_randomization: (
+            CyringeDomainRandomizationConfig | dict[str, Any] | None
+        ) = None,
     ) -> None:
         super().__init__()
         cfg = load_env_config(config_path)
         cyringe_cfg = dict(cfg.get("cyringe", {}))
         if cyringe is not None:
             cyringe_cfg.update(cyringe)
+        json_dr = cfg.get("domain_randomization")
+        if domain_randomization is not None:
+            self._domain_randomization = CyringeDomainRandomizationConfig.resolve(
+                domain_randomization,
+                json_dr,
+            )
+        else:
+            self._domain_randomization = (
+                CyringeDomainRandomizationConfig.from_env_config(
+                    json_dr,
+                    randomize_hand=randomize_hand,
+                    randomize_cyringe=randomize_cyringe,
+                )
+            )
+        self._episode_dr: CyringeEpisodeSample | None = None
 
         self._scene_xml = Path(scene_xml) if scene_xml is not None else SCENE_XML
         if not self._scene_xml.is_file():
@@ -187,6 +220,8 @@ class LeapFlexCyringeEnv(gym.Env):
 
         self._cyringe_housing_name: str | None = None
         self._cyringe_housing_body_id = -1
+        self._cyringe_freejoint_id = -1
+        self._cyringe_spawn_pos = np.zeros(3, dtype=np.float64)
         self._cyringe_spawn_z = 0.0
         self._squeeze_qposadr = -1
         self._squeeze_qpos_hi = 0.0
@@ -218,7 +253,8 @@ class LeapFlexCyringeEnv(gym.Env):
             housing_friction=spawn.housing_friction,
         )
         self._cyringe_housing_name = housing.name
-        self._cyringe_spawn_z = float(np.asarray(spawn_pos, dtype=np.float64)[2])
+        self._cyringe_spawn_pos = np.asarray(spawn_pos, dtype=np.float64).copy()
+        self._cyringe_spawn_z = float(self._cyringe_spawn_pos[2])
 
         self.ee_site = None
         self.goal_mocap = None
@@ -251,6 +287,18 @@ class LeapFlexCyringeEnv(gym.Env):
             self.model, mj.mjtObj.mjOBJ_ACTUATOR, "th_axl_act"
         )
         self._reward.bind(self.model, self._cyringe_housing_name)
+        self._cyringe_freejoint_id = cyringe_housing_freejoint_id(
+            self.model, self._cyringe_housing_name
+        )
+        if (
+            self._domain_randomization is not None
+            and self._domain_randomization.randomize_cyringe
+            and self._cyringe_freejoint_id < 0
+        ):
+            raise ValueError(
+                "Cyringe pose domain randomization requires a free housing; "
+                "set sticky=false"
+            )
         self._cache_termination_ids()
 
         self._flex_names = list_flex_names(self.model)
@@ -332,6 +380,36 @@ class LeapFlexCyringeEnv(gym.Env):
         joint_id = int(self.model.actuator_trnid[act_id, 0])
         self.data.ctrl[act_id] = float(value)
         self.data.qpos[int(self.model.jnt_qposadr[joint_id])] = float(value)
+
+    def _apply_hand_qpos(self, qpos: np.ndarray) -> None:
+        qpos = np.asarray(qpos, dtype=np.float64).reshape(len(LEAP_JOINT_ORDER))
+        qpos = np.clip(qpos, self._ctrl_lo, self._ctrl_hi)
+        for act_id, value in zip(self._actuator_ids, qpos):
+            self._set_actuator_qpos(int(act_id), float(value))
+
+    def _apply_episode_randomization(self, sample: CyringeEpisodeSample) -> None:
+        if sample.hand_qpos is not None:
+            self._apply_hand_qpos(np.asarray(sample.hand_qpos, dtype=np.float64))
+        if self._domain_randomization is None or not (
+            self._domain_randomization.randomize_cyringe
+        ):
+            return
+        if self._cyringe_housing_name is None:
+            return
+        pos = self._cyringe_spawn_pos + np.asarray(
+            sample.cyringe_offset, dtype=np.float64
+        )
+        euler = np.asarray(self._current_spawn.euler, dtype=np.float64) + np.asarray(
+            sample.cyringe_euler_delta, dtype=np.float64
+        )
+        set_cyringe_pose(
+            self.model,
+            self.data,
+            self._cyringe_housing_name,
+            pos,
+            euler=euler,
+        )
+        self._cyringe_spawn_z = float(pos[2])
 
     def _get_obs(self) -> dict[str, Any]:
         forces = self._force_est.update(self.model, self.data)
@@ -428,6 +506,15 @@ class LeapFlexCyringeEnv(gym.Env):
         self.data.ctrl[:] = 0.0
         if self._th_axl_act_id >= 0:
             self._set_actuator_qpos(self._th_axl_act_id, self._th_axl_initial)
+        self._cyringe_spawn_z = float(self._cyringe_spawn_pos[2])
+        self._episode_dr = None
+        if self._domain_randomization is not None:
+            self._episode_dr = self._domain_randomization.sample(
+                self.np_random,
+                hand_lo=self._ctrl_lo,
+                hand_hi=self._ctrl_hi,
+            )
+            self._apply_episode_randomization(self._episode_dr)
         self._reward.reset(self.model, self.data)
         if options is not None and "qpos" in options:
             self.data.qpos[:] = np.asarray(options["qpos"], dtype=np.float64)
@@ -437,7 +524,17 @@ class LeapFlexCyringeEnv(gym.Env):
         self._force_est.reset()
         self._timestep = 0
         obs = self._get_obs()
-        return obs, {"cyringe_spawn": self.cyringe_spawn}
+        info: dict[str, Any] = {"cyringe_spawn": self.cyringe_spawn}
+        if self._episode_dr is not None:
+            dr_info = self._episode_dr.as_dict()
+            if self._cyringe_housing_name is not None:
+                pos, quat = cyringe_housing_pose(
+                    self.model, self.data, self._cyringe_housing_name
+                )
+                dr_info["cyringe_pos"] = pos.tolist()
+                dr_info["cyringe_quat"] = quat.tolist()
+            info["domain_randomization"] = dr_info
+        return obs, info
 
     def step(
         self, action: np.ndarray

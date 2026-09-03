@@ -26,7 +26,7 @@ from gymnasium.vector import AsyncVectorEnv, VectorEnv
 from tqdm import tqdm
 
 from data_collection.policies import Policy, VectorPolicy
-from env.domain_randomization import DomainRandomizationConfig
+from env.domain_randomization.flex_dr import DomainRandomizationConfig
 from env.leap_flex_env import LeapFlexEnv, make_leap_flex_env
 from util.fk_taxel_util import LEAP_JOINT_ORDER, N_TAXELS
 from util.motion_util import GRASP_PATTERNS, GraspProfile
