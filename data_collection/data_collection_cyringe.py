@@ -175,6 +175,7 @@ def load_config(path: Path | str) -> dict[str, Any]:
         "n_substeps": n_substeps,
         "max_timestep": max_timestep,
         "cyringe": cyringe_overrides or None,
+        "domain_randomization": env_cfg.get("domain_randomization"),
         "ik_helpers": ik_helpers,
         "n_traj_waypoints": n_traj_waypoints,
     }

@@ -16,7 +16,7 @@
     "euler": [0.0, 1.5707963267948966, -1.5707963267948966],
     "sticky": false,
     "friction": [0.1, 0.005, 0.0001],
-    "housing_friction": [2,2,2]
+    "housing_friction": [4,2,4]
   },
   "domain_randomization": {
     "enabled": true,
