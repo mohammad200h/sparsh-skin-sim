@@ -8,7 +8,7 @@ env:
   n_substeps: 1
   max_timestep: 4000
   render: true
-  num_envs: 1
+  num_envs: 4
   cyringe:
     sticky: false
   domain_randomization:
@@ -19,10 +19,10 @@ env:
       enabled: true
       offset_low: [-0.02, -0.02, 0.0]
       offset_high: [0.02, 0.02, 0.0]
-      euler_delta_low: [0.0, 0.0, -0.4]
-      euler_delta_high: [0.0, 0.0, 0.4]
+      euler_delta_low: [0.0, 0.0, -0.2]
+      euler_delta_high: [0.0, 0.0, 0.2]
   
-  discared_episode:
+  discarded_episode:
     termination_causes:
       - flex_exploded
       - sim_unstable

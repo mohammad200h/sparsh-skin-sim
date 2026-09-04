@@ -1,4 +1,4 @@
-"""Collect Leap+XELA cyringe episodes driven by a YAML policy."""
+"""Collect Leap+XELA cyringe episodes driven by YAML ``policy.type``."""
 
 from __future__ import annotations
 
@@ -36,28 +36,15 @@ from data_collection.policies import (
     VectorCyringePolicy,
     VectorRandomPolicy,
 )
-from env.domain_randomization.cytinge_dr import CyringeDomainRandomizationConfig
 from env.leap_flex_cyringe_env import LeapFlexCyringeEnv
 from util.fk_taxel_util import LEAP_JOINT_ORDER, N_TAXELS
 from util.trajectory_generation import DEFAULT_TRAJ_WAYPOINTS
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config" / "cyringe.yaml"
-POLICY_CYRINGE = "cyringe_two_phase"
-POLICY_RANDOM = "random"
-_CYRINGE_POLICY_ALIASES = frozenset({POLICY_CYRINGE, "cyringe"})
-_SINGLE_POLICIES = (CyringePolicy, RandomPolicy)
-_VECTOR_POLICIES = (VectorCyringePolicy, VectorRandomPolicy)
-_ENV_TERMINATION_CAUSES = frozenset(
-    {
-        "flex_exploded",
-        "sim_unstable",
-        "max_timestep",
-        "cyringe_dropped",
-        "cyringe_flying",
-        "cyringe_handle_fully_pressed",
-    }
-)
-_DISCARD_SECTION_KEYS = ("discarded_episode", "discared_episode")
+
+SingleCollectorPolicy = CyringePolicy | RandomPolicy
+VectorCollectorPolicy = VectorCyringePolicy | VectorRandomPolicy
+CollectorPolicy = SingleCollectorPolicy | VectorCollectorPolicy
 
 
 def _env_step_seconds(env: LeapFlexCyringeEnv) -> float:
@@ -71,74 +58,52 @@ def _require_section(config: dict[str, Any], name: str) -> dict[str, Any]:
     return section
 
 
-def _discard_section(
-    config: dict[str, Any], collection: dict[str, Any], env_cfg: dict[str, Any]
-) -> dict[str, Any] | None:
-    for mapping in (env_cfg, collection, config):
-        for key in _DISCARD_SECTION_KEYS:
-            raw = mapping.get(key)
-            if raw is not None:
-                return raw
-    return None
-
-
-def _parse_discard_termination_causes(raw: Any) -> frozenset[str]:
-    if raw is None:
+def _discard_causes_from_env_cfg(env_cfg: dict[str, Any]) -> frozenset[str]:
+    discarded = env_cfg.get("discarded_episode")
+    if discarded is None:
+        discarded = env_cfg.get("discared_episode")
+    if discarded is None:
         return frozenset()
-    if not isinstance(raw, dict):
-        raise ValueError("discarded_episode must be a mapping")
-    causes = raw.get("termination_causes", [])
-    if causes is None:
-        return frozenset()
-    if isinstance(causes, str):
-        causes = [causes]
-    if not isinstance(causes, (list, tuple)):
+    if not isinstance(discarded, dict):
+        raise ValueError("env.discarded_episode must be a mapping")
+    causes = discarded.get("termination_causes", [])
+    if not isinstance(causes, list):
         raise ValueError(
-            "discarded_episode.termination_causes must be a list of strings"
+            "env.discarded_episode.termination_causes must be a list"
         )
-    parsed: list[str] = []
-    unknown: list[str] = []
-    for cause in causes:
-        name = str(cause).strip()
-        if not name:
-            continue
-        if name not in _ENV_TERMINATION_CAUSES:
-            unknown.append(name)
-            continue
-        parsed.append(name)
-    if unknown:
-        raise ValueError(
-            "Unknown discarded_episode.termination_causes "
-            f"{unknown}. Expected a subset of {sorted(_ENV_TERMINATION_CAUSES)}"
-        )
-    return frozenset(parsed)
+    return frozenset(str(cause) for cause in causes)
 
 
-def _causes_from_info(
-    info: dict[str, Any] | None, env_id: int | None = None
-) -> list[str]:
-    if not info:
+def _as_cause_list(value: Any) -> list[str]:
+    if value is None:
         return []
-    raw = info.get("termination_causes")
-    if env_id is not None and raw is not None:
-        raw = raw[env_id]
-    if raw is None:
-        cause = info.get("termination_cause")
-        if env_id is not None and cause is not None:
-            cause = cause[env_id]
-        if cause is None or cause is False:
+    if isinstance(value, np.ndarray):
+        value = value.tolist() if value.ndim > 0 else value.item()
+    if isinstance(value, str):
+        return [part.strip() for part in value.split(",") if part.strip()]
+    if isinstance(value, (list, tuple)):
+        return [str(item) for item in value if item is not None]
+    return [str(value)]
+
+
+def _causes_from_step_info(info: dict[str, Any]) -> list[str]:
+    if "termination_causes" in info:
+        return _as_cause_list(info["termination_causes"])
+    return _as_cause_list(info.get("termination_cause"))
+
+
+def _causes_from_vector_info(info: dict[str, Any], env_id: int) -> list[str]:
+    mask = info.get("_termination_causes")
+    if mask is not None and not bool(np.asarray(mask)[env_id]):
+        cause_mask = info.get("_termination_cause")
+        if cause_mask is None or not bool(np.asarray(cause_mask)[env_id]):
             return []
-        text = str(cause)
-        if not text or text == "None":
-            return []
-        return [part for part in text.split(",") if part]
-    if isinstance(raw, np.ndarray):
-        raw = raw.tolist()
-    if not raw:
-        return []
-    if isinstance(raw, str):
-        return [raw]
-    return [str(cause) for cause in raw]
+        return _as_cause_list(info["termination_cause"][env_id])
+    if "termination_causes" in info:
+        return _as_cause_list(info["termination_causes"][env_id])
+    if "termination_cause" in info:
+        return _as_cause_list(info["termination_cause"][env_id])
+    return []
 
 
 def _should_discard_episode(
@@ -184,10 +149,9 @@ def load_config(path: Path | str) -> dict[str, Any]:
         if max_timestep < 1:
             raise ValueError("env.max_timestep must be at least 1")
 
+    policy_type = str(policy_cfg.get("type") or "cyringe").strip().lower()
     motion_params: CyringeMotionParams | RandomMotionParams
-    policy_type = str(policy_cfg.get("type", POLICY_CYRINGE)).strip()
-    if policy_type in _CYRINGE_POLICY_ALIASES:
-        policy_type = POLICY_CYRINGE
+    if policy_type in {"cyringe", "cyringe_two_phase"}:
         motion_params = CyringeMotionParams.from_dict(policy_cfg)
         use_trajectory = bool(motion_params.use_trajectory)
         n_traj_waypoints = (
@@ -196,36 +160,24 @@ def load_config(path: Path | str) -> dict[str, Any]:
         if use_trajectory and (n_traj_waypoints is None or n_traj_waypoints < 1):
             n_traj_waypoints = DEFAULT_TRAJ_WAYPOINTS
         ik_helpers = True
-    elif policy_type == POLICY_RANDOM:
+    elif policy_type == "random":
         motion_params = RandomMotionParams.from_dict(policy_cfg)
         n_traj_waypoints = None
         ik_helpers = False
     else:
         raise ValueError(
-            f"policy.type must be '{POLICY_CYRINGE}' or '{POLICY_RANDOM}', "
-            f"got {policy_type!r}"
+            f"Unknown policy.type {policy_cfg.get('type')!r}; "
+            "expected 'cyringe' or 'random'"
         )
 
-    domain_randomization = CyringeDomainRandomizationConfig.from_dict(
-        env_cfg.get("domain_randomization")
-    )
     cyringe_overrides = dict(env_cfg.get("cyringe") or {})
-    if (
-        domain_randomization is not None
-        and domain_randomization.randomize_cyringe
-        and bool(cyringe_overrides.get("sticky", False))
-    ):
-        raise ValueError(
-            "Cyringe pose domain randomization requires env.cyringe.sticky=false"
-        )
-
     base_env = {
         "n_substeps": n_substeps,
         "max_timestep": max_timestep,
         "cyringe": cyringe_overrides or None,
+        "domain_randomization": env_cfg.get("domain_randomization"),
         "ik_helpers": ik_helpers,
         "n_traj_waypoints": n_traj_waypoints,
-        "domain_randomization": domain_randomization,
     }
 
     return {
@@ -239,9 +191,7 @@ def load_config(path: Path | str) -> dict[str, Any]:
         "env_kwargs": base_env,
         "policy_type": policy_type,
         "motion_params": motion_params,
-        "discard_termination_causes": _parse_discard_termination_causes(
-            _discard_section(config, collection, env_cfg)
-        ),
+        "discard_causes": _discard_causes_from_env_cfg(env_cfg),
     }
 
 
@@ -272,12 +222,7 @@ def _reference_env(env: LeapFlexCyringeEnv | SyncVectorEnv) -> LeapFlexCyringeEn
     return env
 
 
-def _domain_randomization_info(env: LeapFlexCyringeEnv) -> dict[str, Any] | None:
-    sample = env._episode_dr
-    return None if sample is None else sample.as_dict()
-
-
-def _cyringe_policy_for_env(
+def _policy_for_cyringe_env(
     env: LeapFlexCyringeEnv, motion_params: CyringeMotionParams
 ) -> CyringePolicy:
     return CyringePolicy(
@@ -291,14 +236,14 @@ def _cyringe_policy_for_env(
     )
 
 
-def _random_policy_for_env(
+def _policy_for_random_env(
     env: LeapFlexCyringeEnv,
     motion_params: RandomMotionParams,
     seed: int | None,
 ) -> RandomPolicy:
     return RandomPolicy(
-        env.action_space.low,
-        env.action_space.high,
+        np.asarray(env.action_space.low, dtype=np.float64),
+        np.asarray(env.action_space.high, dtype=np.float64),
         params=motion_params,
         seed=seed,
     )
@@ -311,43 +256,39 @@ def _build_policy(
     *,
     policy_type: str,
     seed: int | None,
-) -> CyringePolicy | VectorCyringePolicy | RandomPolicy | VectorRandomPolicy:
-    if policy_type == POLICY_RANDOM:
-        if not isinstance(motion_params, RandomMotionParams):
-            raise TypeError("Expected RandomMotionParams for policy.type=random")
-        if num_envs == 1:
-            if not isinstance(env, LeapFlexCyringeEnv):
-                raise TypeError("Expected LeapFlexCyringeEnv for num_envs=1")
-            return _random_policy_for_env(env, motion_params, seed)
-        if not isinstance(env, SyncVectorEnv):
-            raise TypeError("Expected SyncVectorEnv for num_envs > 1")
-        policies = [
-            _random_policy_for_env(
-                sub,  # type: ignore[arg-type]
-                motion_params,
-                None if seed is None else int(seed) + i,
-            )
-            for i, sub in enumerate(env.envs)
-        ]
-        return VectorRandomPolicy(policies)
-
-    if policy_type != POLICY_CYRINGE:
-        raise ValueError(f"Unsupported policy_type {policy_type!r}")
-    if not isinstance(motion_params, CyringeMotionParams):
-        raise TypeError("Expected CyringeMotionParams for cyringe_two_phase")
-
+) -> CollectorPolicy:
     if num_envs == 1:
         if not isinstance(env, LeapFlexCyringeEnv):
             raise TypeError("Expected LeapFlexCyringeEnv for num_envs=1")
-        return _cyringe_policy_for_env(env, motion_params)
+        if policy_type == "random":
+            if not isinstance(motion_params, RandomMotionParams):
+                raise TypeError("random policy requires RandomMotionParams")
+            return _policy_for_random_env(env, motion_params, seed)
+        if not isinstance(motion_params, CyringeMotionParams):
+            raise TypeError("cyringe policy requires CyringeMotionParams")
+        return _policy_for_cyringe_env(env, motion_params)
 
     if not isinstance(env, SyncVectorEnv):
         raise TypeError("Expected SyncVectorEnv for num_envs > 1")
-    policies = [
-        _cyringe_policy_for_env(sub, motion_params)  # type: ignore[arg-type]
+    if policy_type == "random":
+        if not isinstance(motion_params, RandomMotionParams):
+            raise TypeError("random policy requires RandomMotionParams")
+        random_policies = [
+            _policy_for_random_env(
+                sub,  # type: ignore[arg-type]
+                motion_params,
+                None if seed is None else seed + i,
+            )
+            for i, sub in enumerate(env.envs)
+        ]
+        return VectorRandomPolicy(random_policies)
+    if not isinstance(motion_params, CyringeMotionParams):
+        raise TypeError("cyringe policy requires CyringeMotionParams")
+    cyringe_policies = [
+        _policy_for_cyringe_env(sub, motion_params)  # type: ignore[arg-type]
         for sub in env.envs
     ]
-    return VectorCyringePolicy(policies)
+    return VectorCyringePolicy(cyringe_policies)
 
 
 def _slice_obs(obs: dict[str, Any], index: int) -> dict[str, Any]:
@@ -450,7 +391,7 @@ class _EpisodeBuffer:
 
 
 def _collect_single_env(
-    policy: CyringePolicy | RandomPolicy,
+    policy: SingleCollectorPolicy,
     env: LeapFlexCyringeEnv,
     num_episodes: int,
     *,
@@ -461,7 +402,7 @@ def _collect_single_env(
     config_path: Path | None,
     render: bool,
     metadata_base: dict[str, Any],
-    discard_termination_causes: frozenset[str],
+    discard_causes: frozenset[str],
 ) -> Path:
     del duration, config_path
     step_seconds = metadata_base["step_seconds"]
@@ -471,24 +412,23 @@ def _collect_single_env(
         else nullcontext()
     )
 
-    episodes_saved = 0
-    attempts = 0
-    discarded = 0
-    pbar = tqdm(total=num_episodes, desc="Collecting episodes")
     with viewer_ctx as viewer:
-        while episodes_saved < num_episodes:
+        saved = 0
+        attempt = 0
+        discarded = 0
+        pbar = tqdm(total=num_episodes, desc="Collecting episodes")
+        while saved < num_episodes:
             if render and not viewer.is_running():
                 print("Viewer closed; stopping collection early.")
                 break
 
-            episode_seed = None if seed is None else int(seed) + attempts
-            attempts += 1
+            episode_seed = None if seed is None else seed + attempt
             obs, reset_info = env.reset(seed=episode_seed)
             policy.reset()
 
             buffer = _EpisodeBuffer()
             terminated_by_env = False
-            step_info: dict[str, Any] = {}
+            causes: list[str] = []
 
             for _ in range(max_steps_per_episode):
                 if render and not viewer.is_running():
@@ -507,6 +447,7 @@ def _collect_single_env(
 
                 if terminated or truncated:
                     terminated_by_env = True
+                    causes = _causes_from_step_info(step_info)
                     break
 
             if render and not viewer.is_running():
@@ -516,22 +457,23 @@ def _collect_single_env(
             if not buffer:
                 break
 
-            causes = _causes_from_info(step_info)
-            if _should_discard_episode(causes, discard_termination_causes):
+            attempt += 1
+            if _should_discard_episode(causes, discard_causes):
                 discarded += 1
-                pbar.set_postfix(discarded=discarded)
+                tqdm.write(
+                    f"Discarding episode attempt {attempt} (causes={causes})"
+                )
                 continue
 
             metadata = {
                 **metadata_base,
-                "episode": episodes_saved,
+                "episode": saved,
                 "seed": episode_seed,
                 "num_steps": len(buffer),
                 "terminated_by_env": terminated_by_env,
                 "termination_causes": causes,
                 "env_slot": 0,
                 "cyringe_spawn": reset_info.get("cyringe_spawn", env.cyringe_spawn),
-                "domain_randomization": reset_info.get("domain_randomization"),
             }
             arrays = _episode_arrays(
                 buffer.actions,
@@ -540,21 +482,21 @@ def _collect_single_env(
                 step_seconds=step_seconds,
             )
             _save_episode(
-                output_dir / f"episode_{episodes_saved:04d}.npz",
+                output_dir / f"episode_{saved:04d}.npz",
                 arrays,
                 metadata=metadata,
             )
-            episodes_saved += 1
+            saved += 1
             pbar.update(1)
-            if discarded:
-                pbar.set_postfix(discarded=discarded)
+        pbar.close()
+        if discarded:
+            print(f"Discarded {discarded} episode(s) matching termination causes.")
 
-    pbar.close()
     return output_dir
 
 
 def _collect_vector_env(
-    policy: VectorCyringePolicy | VectorRandomPolicy,
+    policy: VectorCollectorPolicy,
     env: SyncVectorEnv,
     num_envs: int,
     num_episodes: int,
@@ -564,31 +506,33 @@ def _collect_vector_env(
     seed: int | None,
     config_path: Path | None,
     metadata_base: dict[str, Any],
-    discard_termination_causes: frozenset[str],
+    discard_causes: frozenset[str],
 ) -> Path:
     del config_path
 
     step_seconds = metadata_base["step_seconds"]
     buffers = [_EpisodeBuffer() for _ in range(num_envs)]
-    episodes_saved = 0
+    episodes_collected = 0
     discarded = 0
-    attempts = num_envs
+    slot_spawns = [env.envs[i].cyringe_spawn for i in range(num_envs)]
+    slot_seeds: list[int | None] = [
+        None if seed is None else seed + i for i in range(num_envs)
+    ]
+    next_seed = None if seed is None else seed + num_envs
 
     obs, _ = env.reset(seed=seed)
     policy.reset()
-    slot_spawns = [env.envs[i].cyringe_spawn for i in range(num_envs)]
-    slot_dr = [_domain_randomization_info(env.envs[i]) for i in range(num_envs)]
 
     pbar = tqdm(total=num_episodes, desc="Collecting episodes")
-    while episodes_saved < num_episodes:
+    while episodes_collected < num_episodes:
         actions = policy.act(obs)
-        obs, rewards, terminated, truncated, infos = env.step(actions)
+        obs, rewards, terminated, truncated, info = env.step(actions)
 
         reset_mask = np.zeros(num_envs, dtype=np.bool_)
         reset_seeds: list[int | None] = [None] * num_envs
 
         for env_id in range(num_envs):
-            if episodes_saved >= num_episodes:
+            if episodes_collected >= num_episodes:
                 break
 
             buffers[env_id].append(
@@ -600,28 +544,31 @@ def _collect_vector_env(
             if not done and not at_max_steps:
                 continue
 
-            causes = _causes_from_info(infos, env_id)
+            causes = _causes_from_vector_info(info, env_id) if done else []
+            episode_seed = slot_seeds[env_id]
             reset_mask[env_id] = True
-            reset_seeds[env_id] = None if seed is None else int(seed) + attempts
-            attempts += 1
+            reset_seeds[env_id] = next_seed
+            if next_seed is not None:
+                slot_seeds[env_id] = next_seed
+                next_seed += 1
 
-            if _should_discard_episode(causes, discard_termination_causes):
+            if _should_discard_episode(causes, discard_causes):
                 discarded += 1
-                pbar.set_postfix(discarded=discarded)
+                tqdm.write(
+                    f"Discarding episode from env {env_id} (causes={causes})"
+                )
                 buffers[env_id].clear()
                 continue
 
-            episode_seed = None if seed is None else int(seed) + episodes_saved
             metadata = {
                 **metadata_base,
-                "episode": episodes_saved,
+                "episode": episodes_collected,
                 "seed": episode_seed,
                 "num_steps": len(buffers[env_id]),
                 "terminated_by_env": done,
                 "termination_causes": causes,
                 "env_slot": env_id,
                 "cyringe_spawn": slot_spawns[env_id],
-                "domain_randomization": slot_dr[env_id],
             }
             arrays = _episode_arrays(
                 buffers[env_id].actions,
@@ -630,15 +577,13 @@ def _collect_vector_env(
                 step_seconds=step_seconds,
             )
             _save_episode(
-                output_dir / f"episode_{episodes_saved:04d}.npz",
+                output_dir / f"episode_{episodes_collected:04d}.npz",
                 arrays,
                 metadata=metadata,
             )
             buffers[env_id].clear()
-            episodes_saved += 1
+            episodes_collected += 1
             pbar.update(1)
-            if discarded:
-                pbar.set_postfix(discarded=discarded)
 
         if not reset_mask.any():
             continue
@@ -648,17 +593,16 @@ def _collect_vector_env(
         obs, _ = env.reset(seed=reset_seeds, options={"reset_mask": reset_mask})
         for env_id in np.flatnonzero(reset_mask).tolist():
             slot_spawns[env_id] = env.envs[env_id].cyringe_spawn
-            slot_dr[env_id] = _domain_randomization_info(env.envs[env_id])
             policy.reset(env_id)
 
     pbar.close()
+    if discarded:
+        print(f"Discarded {discarded} episode(s) matching termination causes.")
     return output_dir
 
 
 def collect_cyringe_data(
-    policy: (
-        CyringePolicy | VectorCyringePolicy | RandomPolicy | VectorRandomPolicy
-    ),
+    policy: CollectorPolicy,
     env: LeapFlexCyringeEnv | SyncVectorEnv,
     num_envs: int,
     num_episodes: int,
@@ -669,9 +613,9 @@ def collect_cyringe_data(
     duration: float = 10.0,
     config_path: Path | None = None,
     render: bool = False,
-    discard_termination_causes: frozenset[str] | None = None,
+    discard_causes: frozenset[str] | None = None,
 ) -> Path:
-    """Run until ``num_episodes`` are saved (discarded rollouts are retried)."""
+    """Run ``num_episodes`` and write one compressed ``.npz`` per episode."""
     if num_episodes < 1:
         raise ValueError("num_episodes must be at least 1")
 
@@ -680,11 +624,12 @@ def collect_cyringe_data(
     step_seconds = _env_step_seconds(ref_env)
     if max_steps_per_episode is None:
         max_steps_per_episode = max(1, int(np.ceil(duration / step_seconds)))
-    discard_causes = frozenset(discard_termination_causes or ())
+    if discard_causes is None:
+        discard_causes = frozenset()
 
     metadata_base = {
         "config_path": str(config_path) if config_path is not None else None,
-        "motion": getattr(policy, "motion_name", POLICY_CYRINGE),
+        "motion": getattr(policy, "motion_name", "cyringe_two_phase"),
         "profile": asdict(policy.profile),
         "step_seconds": step_seconds,
         "max_steps_per_episode": max_steps_per_episode,
@@ -692,15 +637,13 @@ def collect_cyringe_data(
         "num_envs": num_envs,
         "n_taxels": N_TAXELS,
         "joint_names": LEAP_JOINT_ORDER,
-        "domain_randomization_enabled": ref_env._domain_randomization is not None,
-        "discard_termination_causes": sorted(discard_causes),
         "ee_site": ref_env.ee_site,
         "goal_mocap": ref_env.goal_mocap,
         "traj_mocap_names": ref_env.traj_mocap_names,
     }
 
     if num_envs == 1:
-        if not isinstance(policy, _SINGLE_POLICIES):
+        if not isinstance(policy, (CyringePolicy, RandomPolicy)):
             raise TypeError(
                 "Expected CyringePolicy or RandomPolicy for num_envs=1"
             )
@@ -717,10 +660,10 @@ def collect_cyringe_data(
             config_path=config_path,
             render=render,
             metadata_base=metadata_base,
-            discard_termination_causes=discard_causes,
+            discard_causes=discard_causes,
         )
 
-    if not isinstance(policy, _VECTOR_POLICIES):
+    if not isinstance(policy, (VectorCyringePolicy, VectorRandomPolicy)):
         raise TypeError(
             "Expected VectorCyringePolicy or VectorRandomPolicy for num_envs > 1"
         )
@@ -742,7 +685,7 @@ def collect_cyringe_data(
         seed=seed,
         config_path=config_path,
         metadata_base=metadata_base,
-        discard_termination_causes=discard_causes,
+        discard_causes=discard_causes,
     )
 
 
@@ -782,11 +725,12 @@ def main() -> None:
         duration=cfg["duration"],
         config_path=cfg["config_path"],
         render=cfg["render"],
-        discard_termination_causes=cfg["discard_termination_causes"],
+        discard_causes=cfg["discard_causes"],
     )
     print(
         f"Saved episodes to {output_dir.resolve()} "
-        f"(motion={cfg['policy_type']}, num_envs={num_envs}, "
+        f"(motion={getattr(policy, 'motion_name', cfg['policy_type'])}, "
+        f"num_envs={num_envs}, "
         f"max_duration={cfg['duration']}s, config={cfg['config_path']})"
     )
     env.close()

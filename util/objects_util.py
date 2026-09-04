@@ -20,11 +20,9 @@ DEFAULT_CYRINGE_CLEARANCE = 0.02
 # Sliding / torsional / rolling; housing is bumped up for a grippier barrel.
 DEFAULT_CYRINGE_FRICTION = (0.1, 0.005, 0.0001)
 DEFAULT_CYRINGE_HOUSING_FRICTION = (0.0, 0.0, 2.5)
-# Flex skins compile with contact priority=1. A lower geom priority makes
-# MuJoCo use the flex friction (0.8) and condim (3), so JSON cyringe friction
-# never reaches the solver. Match priority and use condim=6 so all 3 coeffs apply.
-DEFAULT_CYRINGE_CONTACT_PRIORITY = 1
-DEFAULT_CYRINGE_CONDIM = 6
+# Same as flex contact solref in generatehand_flexcom_sensor.py. Needed when
+# cyringe geoms share flex priority so the mix stays soft on the skins.
+DEFAULT_CYRINGE_SOLREF = (0.01, 1.0)
 # Unscaled mesh AABB half-height (~0.21 m tall); used for spawn clearance.
 _CYRINGE_HALF_HEIGHT = 0.106
 
@@ -1061,9 +1059,13 @@ def add_cyringe(
             geom.contype = int(contype)
             geom.conaffinity = int(conaffinity)
             geom.group = 0
-            geom.priority = int(DEFAULT_CYRINGE_CONTACT_PRIORITY)
-            geom.condim = int(DEFAULT_CYRINGE_CONDIM)
+            geom.condim = 3
             geom.friction = list(friction)
+            # Match flex contact priority (1) so housing_friction can mix
+            # instead of being ignored by the skins. Copy flex solref so the
+            # mix does not inherit the default geom 0.02 timeconst.
+            geom.priority = 1
+            geom.solref = list(DEFAULT_CYRINGE_SOLREF)
 
     housing_body = child.body("housing")
     if housing_body is not None:
@@ -1071,8 +1073,6 @@ def add_cyringe(
         for geom in housing_body.geoms:
             if int(geom.contype) or int(geom.conaffinity):
                 geom.friction = housing_mu
-                geom.priority = int(DEFAULT_CYRINGE_CONTACT_PRIORITY)
-                geom.condim = int(DEFAULT_CYRINGE_CONDIM)
 
     spawn = np.asarray(spawn, dtype=np.float64)
     frame = spec.worldbody.add_frame(
@@ -1163,4 +1163,3 @@ def set_cyringe_pose(
     data.qpos[qadr + 3 : qadr + 7] = orientation
     dadr = int(model.jnt_dofadr[jid])
     data.qvel[dadr : dadr + 6] = 0.0
-

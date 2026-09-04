@@ -15,19 +15,11 @@
     "delta_rot_z": 0.0,
     "euler": [0.0, 1.5707963267948966, -1.5707963267948966],
     "sticky": false,
-    "friction": {
-      "sliding": 0,
-      "torsional":0,
-      "rolling": 0
-    },
-    "housing_friction": {
-      "sliding": 10,
-      "torsional": 10,
-      "rolling": 10
-    }
+    "friction": [0.1, 0.005, 0.0001],
+    "housing_friction": [4,2,4]
   },
   "domain_randomization": {
-    "enabled": false,
+    "enabled": true,
     "hand": {
       "enabled": true
     },

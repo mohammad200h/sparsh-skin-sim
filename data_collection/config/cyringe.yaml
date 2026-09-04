@@ -6,21 +6,23 @@ collection:
 
 env:
   n_substeps: 1
-  max_timestep: 6000
+  max_timestep: 4000
   render: true
-  num_envs: 1
+  num_envs: 4
   cyringe:
     sticky: false
+
   domain_randomization:
-    enabled: true
+    enabled: false
     hand:
-      enabled: false
+      enabled: true
     cyringe:
       enabled: true
       offset_low: [-0.02, -0.02, 0.0]
       offset_high: [0.02, 0.02, 0.0]
       euler_delta_low: [0.0, 0.0, -0.1]
       euler_delta_high: [0.0, 0.0, 0.1]
+
 
 policy:
   ik_backend: pyroki
