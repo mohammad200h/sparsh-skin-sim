@@ -51,6 +51,10 @@ SCENE_XML = (
     / "scene_mjx_cube_CoACD_mjx_flex_sensor.xml"
 )
 ENV_CONFIG_JSON = Path(__file__).resolve().parent / "env_config.json"
+# Flex skins often explode with huge but finite stretch (no NaNs / BADQ warnings).
+FLEX_EXPLODE_STRETCH = 5.0  # edge length / rest length
+FLEX_EXPLODE_POS_M = 2.0  # max |vertex| from origin [m]
+CYRINGE_FLYING_VZ_M_S = 0.9  # |housing COM vz| [m/s] counts as flying
 
 
 def load_env_config(path: Path | str | None = None) -> dict[str, Any]:
@@ -458,11 +462,59 @@ class LeapFlexCyringeEnv(gym.Env):
     def _terminate_max_timestep(self) -> bool:
         return self._timestep >= self._max_timestep
 
+    def _terminate_flex_exploded(self) -> bool:
+        """True when a flex skin stretches or flies apart while still finite."""
+        if int(self.model.nflexvert) > 0:
+            verts = np.asarray(self.data.flexvert_xpos)
+            if np.isfinite(verts).all() and float(np.max(np.abs(verts))) > FLEX_EXPLODE_POS_M:
+                return True
+
+        if int(self.model.nflexedge) > 0:
+            length = np.asarray(self.data.flexedge_length)
+            rest = np.asarray(self.model.flexedge_length0)
+            if np.isfinite(length).all():
+                valid = rest > 1e-9
+                if valid.any():
+                    stretch = float(np.max(length[valid] / rest[valid]))
+                    if stretch > FLEX_EXPLODE_STRETCH:
+                        return True
+        return False
+
+    def _terminate_sim_unstable(self) -> bool:
+        """True when the solver produces NaNs/Infs or BADQ warnings."""
+        if not (
+            np.isfinite(self.data.qpos).all()
+            and np.isfinite(self.data.qvel).all()
+            and np.isfinite(self.data.qacc).all()
+        ):
+            return True
+        if int(self.model.nflexvert) > 0 and not np.isfinite(
+            self.data.flexvert_xpos
+        ).all():
+            return True
+        if int(self.model.nflexedge) > 0 and not np.isfinite(
+            self.data.flexedge_length
+        ).all():
+            return True
+        warning = self.data.warning
+        return (
+            int(warning[mj.mjtWarning.mjWARN_BADQPOS].number)
+            + int(warning[mj.mjtWarning.mjWARN_BADQVEL].number)
+            + int(warning[mj.mjtWarning.mjWARN_BADQACC].number)
+        ) > 0
+
     def _terminate_cyringe_dropped(self) -> bool:
         if self._cyringe_housing_body_id < 0:
             return False
         z = float(self.data.xpos[self._cyringe_housing_body_id, 2])
         return z < self._cyringe_spawn_z - 0.1
+
+    def _terminate_cyringe_flying(self) -> bool:
+        if self._cyringe_housing_body_id < 0:
+            return False
+        # cvel is (rot, lin) at the body COM; index 5 is world vz.
+        vz = float(self.data.cvel[self._cyringe_housing_body_id, 5])
+        return abs(vz) > CYRINGE_FLYING_VZ_M_S
 
     def _terminate_handle_max(self) -> bool:
         if self._squeeze_qposadr < 0:
@@ -472,10 +524,16 @@ class LeapFlexCyringeEnv(gym.Env):
 
     def _termination_causes(self) -> list[str]:
         causes: list[str] = []
+        if self._terminate_flex_exploded():
+            causes.append("flex_exploded")
+        if self._terminate_sim_unstable():
+            causes.append("sim_unstable")
         if self._terminate_max_timestep():
             causes.append("max_timestep")
         if self._terminate_cyringe_dropped():
             causes.append("cyringe_dropped")
+        if self._terminate_cyringe_flying():
+            causes.append("cyringe_flying")
         if self._terminate_handle_max():
             causes.append("handle_max")
         return causes
@@ -493,6 +551,8 @@ class LeapFlexCyringeEnv(gym.Env):
         return {
             "termination_cause": cause,
             "termination_causes": causes,
+            "flex_exploded": "flex_exploded" in causes,
+            "sim_unstable": "sim_unstable" in causes,
         }
 
     def reset(

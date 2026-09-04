@@ -22,7 +22,7 @@ env:
       euler_delta_low: [0.0, 0.0, -0.4]
       euler_delta_high: [0.0, 0.0, 0.4]
   
-  discared_episode:
+  discarded_episode:
     termination_causes:
       - flex_exploded
       - sim_unstable

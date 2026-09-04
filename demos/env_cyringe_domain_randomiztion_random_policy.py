@@ -22,7 +22,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--steps",
         type=int,
-        default=2000,
+        default=200,
         help="Env steps per episode",
     )
     parser.add_argument(

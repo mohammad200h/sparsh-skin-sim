@@ -19,7 +19,7 @@
     "housing_friction": [2,2,2]
   },
   "domain_randomization": {
-    "enabled": false,
+    "enabled": true,
     "hand": {
       "enabled": true
     },
