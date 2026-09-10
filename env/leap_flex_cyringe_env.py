@@ -55,6 +55,7 @@ ENV_CONFIG_JSON = Path(__file__).resolve().parent / "env_config.json"
 FLEX_EXPLODE_STRETCH = 5.0  # edge length / rest length
 FLEX_EXPLODE_POS_M = 2.0  # max |vertex| from origin [m]
 CYRINGE_FLYING_VZ_M_S = 0.9  # |housing COM vz| [m/s] counts as flying
+FINGERTIP_SITES = ("if_tip", "mf_tip", "rf_tip", "th_tip")
 
 
 def load_env_config(path: Path | str | None = None) -> dict[str, Any]:
@@ -541,6 +542,29 @@ class LeapFlexCyringeEnv(gym.Env):
     def _terminate(self) -> bool:
         return bool(self._termination_causes())
 
+    def _get_fingertips_pos(self) -> dict[str, np.ndarray]:
+        """Current fingertip site positions in the world frame."""
+        tips: dict[str, np.ndarray] = {}
+        for name in FINGERTIP_SITES:
+            site_id = mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_SITE, name)
+            if site_id < 0:
+                raise ValueError(f"Fingertip site '{name}' not found")
+            tips[name] = np.array(self.data.site_xpos[site_id], dtype=np.float64)
+        return tips
+
+    def _get_hand_joint_values(self) -> dict[str, float]:
+        """Current hand joint angles in ``LEAP_JOINT_ORDER`` [rad]."""
+        angles = read_leap_joint_angles(self.model, self.data)
+        return {name: float(angles[i]) for i, name in enumerate(LEAP_JOINT_ORDER)}
+
+    def _get_metrics(self) -> dict[str, Any]:
+        """Per-step metrics reported through ``info["metrics"]``."""
+        return {
+            "fingertips_pos": self._get_fingertips_pos(),
+            "hand_joint_values": self._get_hand_joint_values(),
+        }
+
+
     def _step_info(self, causes: list[str]) -> dict[str, Any]:
         if not causes:
             cause: str | None = None
@@ -553,8 +577,9 @@ class LeapFlexCyringeEnv(gym.Env):
             "termination_causes": causes,
             "flex_exploded": "flex_exploded" in causes,
             "sim_unstable": "sim_unstable" in causes,
+            "metrics": self._get_metrics(),
         }
-
+    
     def reset(
         self,
         *,
